@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Backups and local history
+*_bk.json
+translator_history.txt
+
+# Environment
+.venv/
+venv/
+env/
+.env
+
+# Editor / IDE
+.vscode/
+.idea/
+.claude/

@@ -1,0 +1,8 @@
+{
+  "tables": {
+    "EXAMPLE_TBL": "例テーブル"
+  },
+  "columns": {
+    "EXAMPLE_COL": "例項目"
+  }
+}

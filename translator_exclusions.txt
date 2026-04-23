@@ -1,0 +1,7 @@
+SELECT
+DISTINCT
+TRIM
+MAX
+AND
+■処理区分
+ON
