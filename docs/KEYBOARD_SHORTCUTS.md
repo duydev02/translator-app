@@ -34,6 +34,7 @@ Also viewable in-app via **F1**.
 | `Ctrl + + / =` | Zoom in |
 | `Ctrl + -` | Zoom out |
 | `Ctrl + 0` | Reset zoom |
+| `Ctrl + L` | Toggle line numbers |
 
 ## Exclusions dialog
 

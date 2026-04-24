@@ -1745,6 +1745,94 @@ def java_to_design_doc(java_code, table_index, column_index,
     return "\n".join(lines)
 
 
+# ── Line-number sidebar for Text widgets ─────────────────────────────────────
+def _install_text_change_proxy(text):
+    """Install a Tcl proxy on a Text widget so every internal operation that
+    could change the content or the viewport fires a <<TextChange>> virtual
+    event. Needed to keep the line-number sidebar in sync with scrolling,
+    typing, programmatic insert/delete, etc. Idempotent."""
+    if getattr(text, "_change_proxy_installed", False):
+        return
+    text._change_proxy_installed = True
+    orig = text._w + "_orig_change_proxy"
+    text.tk.call("rename", text._w, orig)
+
+    def proxy(*args):
+        try:
+            result = text.tk.call((orig,) + args)
+        except tk.TclError:
+            return None
+        if args:
+            op = args[0]
+            if op in ("insert", "replace", "delete", "mark", "xview", "yview"):
+                try:
+                    text.event_generate("<<TextChange>>", when="tail")
+                except tk.TclError:
+                    pass
+        return result
+
+    text.tk.createcommand(text._w, proxy)
+
+
+class LineNumberCanvas(tk.Canvas):
+    """Narrow canvas that draws line numbers beside a Text widget and stays
+    in sync with its scrolling / resizing / editing."""
+
+    def __init__(self, parent, text_widget, theme_fn, width=44):
+        super().__init__(parent, width=width, bd=0, highlightthickness=0)
+        self.text = text_widget
+        self._theme_fn = theme_fn
+        self._pending = False
+        _install_text_change_proxy(text_widget)
+
+        self.text.bind("<<TextChange>>", self._schedule, add="+")
+        self.text.bind("<Configure>",    self._schedule, add="+")
+        self.bind("<Configure>",         self._schedule, add="+")
+        self._schedule()
+
+    def _schedule(self, _event=None):
+        if self._pending:
+            return
+        self._pending = True
+        self.after_idle(self._redraw)
+
+    def _redraw(self):
+        self._pending = False
+        if not self.winfo_exists():
+            return
+        self.delete("all")
+        t = self._theme_fn()
+        self.configure(bg=t["surface"])
+        fg = t["fg_muted"]
+
+        try:
+            tfont = font.nametofont(str(self.text.cget("font")))
+        except tk.TclError:
+            tfont = font.Font(font=self.text.cget("font"))
+
+        w = max(self.winfo_width() - 4, 4)
+        i = self.text.index("@0,0")
+        steps = 0
+        while steps < 20000:
+            try:
+                dline = self.text.dlineinfo(i)
+            except tk.TclError:
+                break
+            if dline is None:
+                break
+            _, y, _, h, _ = dline
+            num = i.split(".")[0]
+            self.create_text(
+                w, y + h / 2,
+                anchor="e", text=num, fill=fg, font=tfont,
+            )
+            nxt = self.text.index(f"{i}+1line")
+            if nxt == i:
+                break
+            i = nxt
+            steps += 1
+
+
 # ── Floating UI helpers ───────────────────────────────────────────────────────
 class Tooltip:
     def __init__(self, parent):
@@ -1852,6 +1940,10 @@ class TranslatorApp(_BaseTk):
         self._pane_orient = self._settings.get("pane_orient", "vertical")
         if self._pane_orient not in ("vertical", "horizontal"):
             self._pane_orient = "vertical"
+        # Line-number sidebar toggle (Ctrl+L)
+        self._show_line_numbers = tk.BooleanVar(
+            value=bool(self._settings.get("show_line_numbers", False))
+        )
 
         # Transient state
         self._copy_job     = None
@@ -1902,6 +1994,7 @@ class TranslatorApp(_BaseTk):
         self._refresh_history_menu()
         self._set_direction_label()
         self._show_placeholder_if_empty()
+        self._apply_line_numbers()
 
         # Bindings
         self.input_box.bind("<Control-Return>", self._on_ctrl_enter)
@@ -1918,6 +2011,7 @@ class TranslatorApp(_BaseTk):
         self.bind_all("<Control-equal>",      lambda e: self.zoom_in())
         self.bind_all("<Control-minus>",      lambda e: self.zoom_out())
         self.bind_all("<Control-0>",          lambda e: self.zoom_reset())
+        self.bind_all("<Control-l>",          lambda e: self.toggle_line_numbers())
 
         # Right-click context menu
         self.input_box.bind("<Button-3>",  lambda e: self._on_right_click(e, self.input_box))
@@ -2083,12 +2177,18 @@ class TranslatorApp(_BaseTk):
         self._actionbar.pack(side="bottom", fill="x", pady=8)
         self._actionbar.pack_propagate(False)
 
-        # Input fills whatever's left between header and action bar
+        # Input fills whatever's left between header and action bar.
+        # Wrap in a container so a line-number canvas can sit to its left.
+        self._input_container = tk.Frame(top_pane)
+        self._input_container.pack(side="top", fill="both", expand=True)
         self.input_box = scrolledtext.ScrolledText(
-            top_pane, wrap=tk.WORD, font=self._mono,
+            self._input_container, wrap=tk.WORD, font=self._mono,
             relief="flat", borderwidth=0, padx=10, pady=8, undo=True,
         )
-        self.input_box.pack(side="top", fill="both", expand=True)
+        self.input_box.pack(side="left", fill="both", expand=True)
+        self._input_lnums = LineNumberCanvas(
+            self._input_container, self.input_box, lambda: THEMES[self._theme]
+        )  # packed / unpacked by _apply_line_numbers()
 
         self._translate_btn = tk.Button(self._actionbar, text="▶  Translate",
             font=self._btn, relief="flat", padx=20, pady=6, cursor="hand2", bd=0,
@@ -2202,11 +2302,16 @@ class TranslatorApp(_BaseTk):
         self._search_close_btn.pack(side="right", padx=4)
         # Don't pack _search_frame yet (hidden until Ctrl+F)
 
+        self._output_container = tk.Frame(bot_pane)
+        self._output_container.pack(side="top", fill="both", expand=True)
         self.output_box = scrolledtext.ScrolledText(
-            bot_pane, wrap=tk.WORD, font=self._mono,
+            self._output_container, wrap=tk.WORD, font=self._mono,
             relief="flat", borderwidth=0, padx=10, pady=8, state="disabled",
         )
-        self.output_box.pack(fill="both", expand=True)
+        self.output_box.pack(side="left", fill="both", expand=True)
+        self._output_lnums = LineNumberCanvas(
+            self._output_container, self.output_box, lambda: THEMES[self._theme]
+        )  # packed / unpacked by _apply_line_numbers()
 
         # ── Status bar ──
         self._statusbar = tk.Frame(self, height=26)
@@ -2296,6 +2401,13 @@ class TranslatorApp(_BaseTk):
         # PanedWindow sash color
         try:
             self._paned.configure(bg=t["muted_bg"])
+        except Exception:
+            pass
+
+        # Line-number canvases pick up new theme colours on next redraw
+        try:
+            self._input_lnums._schedule()
+            self._output_lnums._schedule()
         except Exception:
             pass
 
@@ -2397,6 +2509,30 @@ class TranslatorApp(_BaseTk):
         self._theme = "light" if self._theme == "dark" else "dark"
         self._apply_theme()
         self._toast.show(f"{self._theme.title()} theme", 1000, "info")
+
+    # ── Line-number sidebar ───────────────────────────────────────────────────
+    def toggle_line_numbers(self):
+        self._show_line_numbers.set(not self._show_line_numbers.get())
+        self._apply_line_numbers()
+        self._toast.show(
+            "Line numbers " + ("on" if self._show_line_numbers.get() else "off"),
+            900, "info",
+        )
+
+    def _apply_line_numbers(self):
+        show = bool(self._show_line_numbers.get())
+        for canvas, sibling in (
+            (self._input_lnums,  self.input_box),
+            (self._output_lnums, self.output_box),
+        ):
+            if show:
+                try:
+                    canvas.pack(side="left", fill="y", before=sibling)
+                except Exception:
+                    canvas.pack(side="left", fill="y")
+                canvas._schedule()
+            else:
+                canvas.pack_forget()
 
     # ── Pane orientation ──────────────────────────────────────────────────────
     def _top_minsize(self):
@@ -2506,6 +2642,11 @@ class TranslatorApp(_BaseTk):
         self._font_size = max(6, min(size, 28))
         self._mono.configure(size=self._font_size)
         self._apply_theme()  # rebuild bold_mono with new size
+        try:
+            self._input_lnums._schedule()
+            self._output_lnums._schedule()
+        except Exception:
+            pass
         self._toast.show(f"Font size: {self._font_size}", 900, "info")
 
     # ── Translate ─────────────────────────────────────────────────────────────
@@ -3896,6 +4037,7 @@ class TranslatorApp(_BaseTk):
             "  Ctrl + / =           Zoom in\n"
             "  Ctrl + -             Zoom out\n"
             "  Ctrl + 0             Reset zoom\n"
+            "  Ctrl + L             Toggle line numbers\n"
             "\n"
             "──  EXCLUSIONS  ──\n"
             "  Right-click text     Add / remove exclusion\n"
@@ -3966,6 +4108,7 @@ class TranslatorApp(_BaseTk):
                 "design_show_order":       bool(self._show_order.get()),
                 "design_show_footer":      bool(self._show_footer.get()),
                 "pane_orient":             self._pane_orient,
+                "show_line_numbers":       bool(self._show_line_numbers.get()),
                 "font_size":     self._font_size,
                 "geometry":      self.winfo_geometry(),
             })

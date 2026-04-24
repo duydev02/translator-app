@@ -4,7 +4,7 @@
   "direction": "forward",
   "schema_filter": "マスタ管理",
   "font_size": 10,
-  "geometry": "1920x1009+-8+-8",
+  "geometry": "1920x1009+-1928+538",
   "filter_schemas": [],
   "filter_tables": [],
   "design_uppercase": true,
