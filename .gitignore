@@ -1,25 +1,47 @@
-# Python
+# ── Python artifacts ──────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# PyInstaller
-build/
-dist/
-*.spec
-
-# Backups and local history
-*_bk.json
-translator_history.txt
-
-# Environment
+# ── Virtual environments ──────────────────────────────────────────────────────
 .venv/
 venv/
 env/
 .env
 
-# Editor / IDE
+# ── PyInstaller ───────────────────────────────────────────────────────────────
+build/
+dist/
+*.spec
+!Translator.spec
+
+# ── User-specific runtime state ──────────────────────────────────────────────
+# These files are generated/updated while the app is running. Each developer
+# or user keeps their own local copy — they don't belong in version control.
+db_schema_output.json
+translator_custom_map.json
+translator_exclusions.txt
+translator_history.txt
+translator_settings.json
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 .claude/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Temporary / backup ────────────────────────────────────────────────────────
+*.bak
+*.tmp
+*_bk.json
+_test_output*.txt

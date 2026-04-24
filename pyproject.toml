@@ -1,0 +1,36 @@
+[project]
+name = "translator"
+version = "1.0.0"
+description = "Physical ↔ Logical name translator and Japanese design-doc generator for legacy Oracle SQL / Java projects."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = ["sql", "oracle", "design-doc", "japanese", "translator", "tkinter"]
+
+# Core app uses only stdlib (Tkinter ships with CPython).
+# Optional runtime extras enable drag-and-drop.
+dependencies = []
+
+[project.optional-dependencies]
+# Drag-and-drop file support in the GUI.
+gui = ["tkinterdnd2>=0.4.0"]
+# Everything needed to package a Windows exe.
+build = ["pyinstaller>=6.0"]
+# Dev conveniences.
+dev = ["ruff>=0.3.0"]
+
+[project.scripts]
+translator = "translator:main"   # only works if translator.py exposes main(); kept for future packaging
+
+# ── Ruff lint config (optional; install with [dev]) ──────────────────────────
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+exclude = ["build", "dist", "__pycache__", ".venv", "venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",  # long lines — the translator.py has a lot of aligned tuples
+    "E741",  # ambiguous var names (t, l, e) are fine in short scopes
+]

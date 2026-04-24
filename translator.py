@@ -1864,15 +1864,22 @@ class TranslatorApp(_BaseTk):
 
         self.title("Translator — Legacy Schema Helper")
         # Window-title-bar icon (separate from the exe's Explorer icon).
-        # Try the bundled icon path first (when frozen), fall back to dev path.
+        # Search order:
+        #   1. Bundled location (sys._MEIPASS/image.ico) when running as exe
+        #   2. assets/image.ico  (source-checkout layout)
+        #   3. image.ico         (legacy flat layout, backward compat)
         try:
-            icon_path = os.path.join(BASE_DIR, "image.ico")
+            candidates = []
             if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-                bundled = os.path.join(sys._MEIPASS, "image.ico")
-                if os.path.exists(bundled):
-                    icon_path = bundled
-            if os.path.exists(icon_path):
-                self.iconbitmap(icon_path)
+                candidates.append(os.path.join(sys._MEIPASS, "image.ico"))
+            candidates.extend([
+                os.path.join(BASE_DIR, "assets", "image.ico"),
+                os.path.join(BASE_DIR, "image.ico"),
+            ])
+            for p in candidates:
+                if os.path.exists(p):
+                    self.iconbitmap(p)
+                    break
         except Exception:
             pass
         geom = self._settings.get("geometry", "1060x800")

@@ -1,0 +1,29 @@
+{
+  "__comment__": "Minimal example. Real file is generated from your Oracle catalog. Copy this file next to Translator.exe as 'db_schema_output.json' to try the app without your real schema.",
+
+  "マスタ管理": {
+    "R_SYOHIN": {
+      "logical_table": "商品マスタ",
+      "columns": {
+        "SYOHIN_CD":        "商品コード",
+        "SYOHIN_NA":        "商品名",
+        "BUNRUI1_CD":       "分類１コード",
+        "BUNRUI2_CD":       "分類２コード",
+        "TANKA":            "単価",
+        "INSERT_TS":        "作成年月日",
+        "UPDATE_TS":        "更新年月日",
+        "DELETE_FG":        "削除フラグ"
+      }
+    },
+    "R_TENPO": {
+      "logical_table": "店舗マスタ",
+      "columns": {
+        "TENPO_CD":         "店舗コード",
+        "TENPO_NA":         "店舗名",
+        "INSERT_TS":        "作成年月日",
+        "UPDATE_TS":        "更新年月日",
+        "DELETE_FG":        "削除フラグ"
+      }
+    }
+  }
+}
