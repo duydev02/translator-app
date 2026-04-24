@@ -51,6 +51,7 @@ for the expected file format.
 - **🖉 User Map** — hand-curated `physical ↔ logical` overrides that win against the JSON. Edit in a table UI or in the raw `translator_custom_map.json` file.
 - **⚠ Inconsistencies** — scans the JSON for columns with conflicting logical names across tables and lets you promote one variant to a User-Map override with one click.
 - **Section toggles** — persistent popup to hide / show any `■` section (processing overview, SQL names, target table, WHERE, JOINs, etc.).
+- **Multi-input tabs** — keep several documents open at once. Each tab has its own input, mode, and direction; filter / exclusions / theme are shared. Ctrl+T new, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab cycle. Double-click a tab to rename; right-click for Duplicate / Close Others. Tabs persist across restarts.
 - **History** — last 10 pasted / opened inputs, one-click reload.
 - **Search in output** (Ctrl+F) with match count.
 - **Drag & drop** a `.sql` / `.txt` / `.md` file onto the window (requires `tkinterdnd2`).
@@ -73,8 +74,20 @@ for the expected file format.
 ## Directory layout
 
 ```
-├── translator.py              entry point
+├── translator.py              thin entry point
 ├── Translator.spec            PyInstaller recipe
+├── translator_app/            application package
+│   ├── paths.py               file locations + constants
+│   ├── themes.py              dark / light palettes
+│   ├── config.py              settings / history / exclusions / user-map I/O
+│   ├── schema.py              JSON index + filters
+│   ├── translate.py           table/inline translate (both directions)
+│   ├── designdoc.py           Java → SQL parser + design-doc emitter
+│   └── ui/
+│       ├── widgets.py         LineNumberCanvas, Tooltip, Toast
+│       ├── app.py             TranslatorApp main window
+│       └── dialogs/           user-map, filter, inconsistency, sections, exclusions, help
+├── tests/                     pytest suite for pure-logic modules
 ├── assets/
 │   ├── image.ico              application icon
 │   └── version.txt            Windows VERSION resource
