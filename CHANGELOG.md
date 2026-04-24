@@ -2,6 +2,33 @@
 
 Notable user-visible changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **Multi-input doc tabs** — edit several documents side-by-side. `Ctrl+T` new,
+  `Ctrl+W` close, `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle. Double-click a tab title
+  to rename it inline; right-click for Rename / Duplicate / Close / Close Others.
+  Tabs persist across restarts (saved to `translator_settings.json`).
+- **Pytest test suite** under `tests/` covering schema, translate, and designdoc
+  pure logic (25 tests). Run with `pytest tests/`.
+
+### Changed
+- **Package refactor** — the single-file `translator.py` (~4100 lines) was
+  split into a `translator_app/` package with `paths`, `themes`, `config`,
+  `schema`, `translate`, `designdoc`, and `ui/` (widgets, dialogs, app).
+  `translator.py` is now a thin entry point. No behavior change for users.
+- **PyInstaller spec** now lists `translator_app.*` explicitly as
+  hidden-imports so the bundled exe is never missing a submodule.
+
+### Fixed
+- **Design Doc mode: lowercase identifiers** — `update tr_foo set bar = ?` now
+  translates correctly. Lookup keys are uppercased before hitting the schema
+  index, so case in the source no longer affects translation.
+- **Schema loader crash on `__comment__` key** — `load_index` now skips
+  top-level non-dict entries in the schema JSON, so files using a
+  `"__comment__": "..."` header (like the shipped sample) no longer break
+  startup.
+
 ## [1.0.0] — 2026-04-24
 
 Initial tagged release after the project restructure.

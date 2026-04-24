@@ -9,7 +9,20 @@ from PyInstaller.utils.hooks import collect_all
 # Bundle the icon at the root of the app (keeps sys._MEIPASS/image.ico lookup working).
 datas = [('assets/image.ico', '.')]
 binaries = []
-hiddenimports = []
+# Explicitly list package modules so a future dynamic import (or PyInstaller
+# bytecode-analysis miss) can never silently drop one from the bundle.
+hiddenimports = [
+    'translator_app',
+    'translator_app.paths',
+    'translator_app.themes',
+    'translator_app.config',
+    'translator_app.schema',
+    'translator_app.translate',
+    'translator_app.designdoc',
+    'translator_app.ui',
+    'translator_app.ui.widgets',
+    'translator_app.ui.app',
+]
 
 # Optional drag-and-drop support if tkinterdnd2 is installed.
 try:

@@ -18,6 +18,8 @@ gui = ["tkinterdnd2>=0.4.0"]
 build = ["pyinstaller>=6.0"]
 # Dev conveniences.
 dev = ["ruff>=0.3.0"]
+# Test dependencies.
+test = ["pytest>=7.0"]
 
 [project.scripts]
 translator = "translator:main"   # only works if translator.py exposes main(); kept for future packaging
@@ -27,6 +29,9 @@ translator = "translator:main"   # only works if translator.py exposes main(); k
 line-length = 110
 target-version = "py310"
 exclude = ["build", "dist", "__pycache__", ".venv", "venv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
