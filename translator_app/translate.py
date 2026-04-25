@@ -55,10 +55,18 @@ def _overlaps_any(pos_start, pos_end, ranges):
 
 # ── Translation ───────────────────────────────────────────────────────────────
 _TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9_]{1,}\b")
+# Inline mode also accepts lowercase / mixed-case identifiers (e.g. `tab_col`
+# in source code). Index keys are uppercase, so callers fall back to .upper()
+# when the exact-case key isn't present.
+_TOKEN_RE_CI = re.compile(r"\b[A-Za-z][A-Za-z0-9_]{1,}\b")
 
 
 def _tokens(text):
     return list(dict.fromkeys(_TOKEN_RE.findall(text)))
+
+
+def _tokens_ci(text):
+    return list(dict.fromkeys(_TOKEN_RE_CI.findall(text)))
 
 
 # ── Forward (Physical → Logical) ──────────────────────────────────────────────
@@ -137,30 +145,34 @@ def translate_inline_mode(
     tables: Iterable[str] | None = None,
     table_context: Iterable[str] | None = None,
 ) -> tuple[str, dict, list]:
-    tokens = _tokens(text)
+    tokens = _tokens_ci(text)
     rmap, kinds, ambig = {}, {}, {}
     for t in tokens:
-        if t in table_index:
-            if tables and t not in tables:
+        # Resolve to whichever key actually exists in the index — exact case
+        # first, then uppercase fallback so lowercase / mixed-case identifiers
+        # (e.g. `tab_col`) match the typically-uppercase index keys.
+        key = t if t in table_index or t in column_index else t.upper()
+        if key in table_index:
+            if tables and key not in tables:
                 continue
-            entries = _filter_entries(table_index[t], schemas=schemas, has_phys_table=False)
+            entries = _filter_entries(table_index[key], schemas=schemas, has_phys_table=False)
             if not entries:
                 continue
-            logical = _most_common(t, entries)
+            logical = _most_common(key, entries)
             if logical and logical != t:
                 rmap[t] = logical
                 kinds[t] = "table"
-                ambig[t] = _is_ambiguous(t, entries)
-        elif t in column_index:
-            entries = _filter_entries(column_index[t], schemas=schemas, tables=tables, has_phys_table=True)
+                ambig[t] = _is_ambiguous(key, entries)
+        elif key in column_index:
+            entries = _filter_entries(column_index[key], schemas=schemas, tables=tables, has_phys_table=True)
             if not entries:
                 continue
             entries = _filter_by_table_context(entries, table_context)
-            logical = _most_common(t, entries)
+            logical = _most_common(key, entries)
             if logical and logical != t:
                 rmap[t] = logical
                 kinds[t] = "column"
-                ambig[t] = _is_ambiguous(t, entries)
+                ambig[t] = _is_ambiguous(key, entries)
 
     if not rmap:
         return text, {}, []
