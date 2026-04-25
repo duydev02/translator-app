@@ -189,6 +189,11 @@ class TranslatorApp(_BaseTk):
         # Focus-in / focus-out for placeholder
         self.input_box.bind("<FocusIn>",  lambda e: self._clear_placeholder())
         self.input_box.bind("<FocusOut>", lambda e: self._show_placeholder_if_empty())
+        # Defensive: if the placeholder somehow ends up visible while the box
+        # has focus (e.g. after Ctrl+⌫ or a programmatic clear), wipe it on
+        # the very first key/click so the user never edits placeholder text.
+        self.input_box.bind("<Key>",       self._guard_placeholder_keypress, add="+")
+        self.input_box.bind("<Button-1>",  self._guard_placeholder_click,    add="+")
 
         # Hover tooltip + toast
         self._tooltip = Tooltip(self)
@@ -197,6 +202,9 @@ class TranslatorApp(_BaseTk):
         self._toast.set_theme_fn(lambda: THEMES[self._theme])
         self.output_box.bind("<Motion>", self._on_output_motion)
         self.output_box.bind("<Leave>",  lambda e: self._tooltip.hide())
+
+        # Attach hover tooltips to discoverability-critical buttons
+        self._install_button_tooltips()
 
         # Drag & drop
         if _DND_AVAILABLE:
@@ -264,41 +272,35 @@ class TranslatorApp(_BaseTk):
             command=lambda: self._set_direction("reverse"))
         self._tab_reverse.pack(side="left", padx=(2, 0))
 
-        # Right side: theme, help, exclusions, schema filter
-        self._theme_btn = tk.Button(self._topbar, text="☀  Light",
-            font=self._ui_b, relief="flat", padx=12, pady=4, cursor="hand2", bd=0,
-            command=self.toggle_theme)
-        self._theme_btn.pack(side="right", padx=(6, 12), pady=8)
-
-        # Layout-orientation toggle (right, left of theme)
-        self._layout_btn = tk.Button(self._topbar,
-            font=self._ui_b, relief="flat", padx=10, pady=4, cursor="hand2", bd=0,
-            command=self.toggle_pane_orient)
-        self._layout_btn.pack(side="right", pady=8)
-
+        # Right side: help + a single Settings menu (theme, layout, filter,
+        # exclusions, user map are all consolidated under here)
         self._help_btn = tk.Button(self._topbar, text="?",
             font=self._ui_b, relief="flat", padx=10, pady=4, cursor="hand2", bd=0,
             command=self.show_help_dialog)
-        self._help_btn.pack(side="right", pady=8)
+        self._help_btn.pack(side="right", padx=(6, 12), pady=8)
 
-        self._excl_btn = tk.Button(self._topbar, text="⊘  Exclusions",
-            font=self._ui_b, relief="flat", padx=12, pady=4, cursor="hand2", bd=0,
-            command=self.open_exclusions_dialog)
-        self._excl_btn.pack(side="right", padx=(0, 6), pady=8)
-
-        # User-defined override map
-        self._umap_btn = tk.Button(self._topbar, text="🖉  User Map",
-            font=self._ui_b, relief="flat", padx=12, pady=4, cursor="hand2", bd=0,
-            command=self.open_user_map_dialog)
-        self._umap_btn.pack(side="right", padx=(0, 6), pady=8)
-
-        # Filter button (replaces the old single-schema combobox)
-        self._filter_btn = tk.Button(
-            self._topbar, text="⚙  Filter",
-            font=self._ui_b, relief="flat", padx=12, pady=4,
-            cursor="hand2", bd=0, command=self.open_filter_dialog,
-        )
-        self._filter_btn.pack(side="right", padx=(0, 6), pady=8)
+        self._settings_btn = tk.Menubutton(self._topbar, text="⚙  Settings",
+            font=self._ui_b, relief="flat", padx=12, pady=4, cursor="hand2", bd=0)
+        self._settings_menu = tk.Menu(self._settings_btn, tearoff=0)
+        self._settings_btn["menu"] = self._settings_menu
+        # Items — indices used by the refresh helpers below
+        self._SETTINGS_IDX_THEME  = 0
+        self._SETTINGS_IDX_LAYOUT = 1
+        # idx 2 = separator
+        self._SETTINGS_IDX_FILTER = 3
+        self._SETTINGS_IDX_EXCL   = 4
+        self._SETTINGS_IDX_UMAP   = 5
+        # idx 6 = separator, then file ops (Open, Reload JSON)
+        self._settings_menu.add_command(label="Theme",  command=self.toggle_theme)
+        self._settings_menu.add_command(label="Layout", command=self.toggle_pane_orient)
+        self._settings_menu.add_separator()
+        self._settings_menu.add_command(label="⚙  Filter…",     command=self.open_filter_dialog)
+        self._settings_menu.add_command(label="⊘  Exclusions…", command=self.open_exclusions_dialog)
+        self._settings_menu.add_command(label="🖉  User Map…",  command=self.open_user_map_dialog)
+        self._settings_menu.add_separator()
+        self._settings_menu.add_command(label="📂  Open file…",  command=self.on_open_file)
+        self._settings_menu.add_command(label="⟳  Reload JSON", command=self.on_reload_json)
+        self._settings_btn.pack(side="right", pady=8)
 
         # ── Doc-tab bar (multi-input) ────────────────────────────────────────
         self._doctabs_bar = tk.Frame(self, height=30)
@@ -368,25 +370,14 @@ class TranslatorApp(_BaseTk):
             self._input_container, self.input_box, lambda: THEMES[self._theme]
         )  # packed / unpacked by _apply_line_numbers()
 
-        self._translate_btn = tk.Button(self._actionbar, text="▶  Translate",
+        self._translate_btn = tk.Button(self._actionbar, text="▶  Translate  ·  Ctrl+Enter",
             font=self._btn, relief="flat", padx=20, pady=6, cursor="hand2", bd=0,
             command=self.on_translate)
         self._translate_btn.pack(side="left")
 
-        self._clear_btn = tk.Button(self._actionbar, text="✕  Clear",
-            font=self._btn, relief="flat", padx=14, pady=6, cursor="hand2", bd=0,
-            command=self.on_clear)
-        self._clear_btn.pack(side="left", padx=(6, 0))
-
-        self._open_btn = tk.Button(self._actionbar, text="📂  Open",
-            font=self._btn, relief="flat", padx=12, pady=6, cursor="hand2", bd=0,
-            command=self.on_open_file)
-        self._open_btn.pack(side="left", padx=(6, 0))
-
-        self._reload_btn = tk.Button(self._actionbar, text="⟳  Reload JSON",
-            font=self._btn, relief="flat", padx=12, pady=6, cursor="hand2", bd=0,
-            command=self.on_reload_json)
-        self._reload_btn.pack(side="left", padx=(6, 0))
+        # Clear / Open / Reload JSON were here previously. They're now reachable
+        # via keyboard shortcuts (Ctrl+⌫ clear) and the Settings menu (Open file,
+        # Reload JSON), keeping the action bar focused on Translate.
 
         # Uppercase toggle — only visible in Design Doc mode (see _refresh_mode_tabs)
         self._uppercase_var = tk.BooleanVar(value=bool(self._settings.get("design_uppercase", True)))
@@ -450,7 +441,7 @@ class TranslatorApp(_BaseTk):
             command=self.on_export)
         self._save_btn.pack(side="right", padx=(0, 6))
 
-        self._hint_out = tk.Label(out_header, text="Ctrl+C copy · Ctrl+S save · Ctrl+F find",
+        self._hint_out = tk.Label(out_header, text="Ctrl+Shift+C copy · Ctrl+S save · Ctrl+F find",
             font=self._small, anchor="e")
         self._hint_out.pack(side="right", padx=(0, 10))
 
@@ -541,9 +532,9 @@ class TranslatorApp(_BaseTk):
         self._translate_btn.configure(
             bg=t["accent"], fg=t["accent_fg"],
             activebackground=t["accent"], activeforeground=t["accent_fg"])
-        for btn in (self._clear_btn, self._copy_btn, self._excl_btn, self._save_btn,
-                    self._open_btn, self._reload_btn, self._help_btn, self._history_btn,
-                    self._filter_btn, self._umap_btn, self._layout_btn,
+        for btn in (self._copy_btn, self._save_btn,
+                    self._help_btn, self._history_btn,
+                    self._settings_btn,
                     self._doctabs_newbtn,
                     *self._small_buttons):
             btn.configure(bg=t["muted_bg"], fg=t["muted_fg"],
@@ -551,10 +542,14 @@ class TranslatorApp(_BaseTk):
         # Re-render doc tabs so they pick up new theme colors
         if hasattr(self, "_doctabs_inner"):
             self._render_doctabs()
-        self._theme_btn.configure(
-            text="☀  Light" if self._theme == "dark" else "🌙  Dark",
-            bg=t["muted_bg"], fg=t["muted_fg"],
-            activebackground=t["muted_bg"], activeforeground=t["muted_fg"])
+        # Settings menu colors + theme toggle label
+        try:
+            self._settings_menu.configure(
+                bg=t["surface"], fg=t["fg"],
+                activebackground=t["accent"], activeforeground=t["accent_fg"])
+        except Exception:
+            pass
+        self._refresh_theme_menu_item()
 
         # Search entry
         self._search_entry.configure(bg=t["surface"], fg=t["fg"], insertbackground=t["insert"])
@@ -724,10 +719,19 @@ class TranslatorApp(_BaseTk):
         return 180 if self._pane_orient == "vertical" else 320
 
     def _refresh_layout_btn(self):
+        # Show the action the user will take (toggle target), not current state
         if self._pane_orient == "vertical":
-            self._layout_btn.configure(text="⬍  Vertical")
+            label = "⬌  Switch to horizontal layout"
         else:
-            self._layout_btn.configure(text="⬌  Horizontal")
+            label = "⬍  Switch to vertical layout"
+        self._settings_menu.entryconfigure(self._SETTINGS_IDX_LAYOUT, label=label)
+
+    def _refresh_theme_menu_item(self):
+        if self._theme == "dark":
+            label = "☀  Switch to light theme"
+        else:
+            label = "🌙  Switch to dark theme"
+        self._settings_menu.entryconfigure(self._SETTINGS_IDX_THEME, label=label)
 
     def toggle_pane_orient(self):
         self._pane_orient = "horizontal" if self._pane_orient == "vertical" else "vertical"
@@ -1104,8 +1108,13 @@ class TranslatorApp(_BaseTk):
             # in this mode exactly like Inline Replace mode does.
             self._spans = self._compute_design_spans(result, direction)
             self._render_inline(result, unknown=None)
-            self._status_var.set(f"Design Doc generated · hover names for context ({len(self._spans)} spans)")
-            self._sb_match.configure(text=f"Design Doc · {len(self._spans)} spans  ")
+            # Use the same status format as Inline Replace mode.
+            n_t = sum(1 for s in self._spans if s[3] == "table")
+            n_c = sum(1 for s in self._spans if s[3] == "column")
+            n_amb = sum(1 for s in self._spans if s[4])
+            extra_txt = f"  ·  Ambiguous: {n_amb}" if n_amb else ""
+            self._status_var.set(f"Tables: {n_t}  ·  Columns: {n_c}{extra_txt}")
+            self._refresh_output_stats()
             return
 
         ctx = self._table_context
@@ -1147,7 +1156,7 @@ class TranslatorApp(_BaseTk):
         extra_txt = "  ·  " + "  ·  ".join(extra) if extra else ""
 
         self._status_var.set(f"Tables: {n_t}  ·  Columns: {n_c}{extra_txt}")
-        self._sb_match.configure(text=f"T:{n_t} · C:{n_c}{extra_txt}  ")
+        self._refresh_output_stats()
 
     # ── Clear / copy / history ────────────────────────────────────────────────
     def on_clear(self):
@@ -1155,7 +1164,15 @@ class TranslatorApp(_BaseTk):
         self._write_output("")
         self._status_var.set("")
         self._sb_match.configure(text="")
-        self._show_placeholder_if_empty()
+        # If the input still has focus (typical after Ctrl+⌫), don't insert the
+        # placeholder — otherwise the caret ends up sitting inside placeholder
+        # text and the user can edit it as if it were real input.
+        try:
+            has_focus = self.focus_get() is self.input_box
+        except Exception:
+            has_focus = False
+        if not has_focus:
+            self._show_placeholder_if_empty()
 
     def on_copy(self):
         content = self._get_output_without_unknown()
@@ -1337,6 +1354,31 @@ class TranslatorApp(_BaseTk):
         if self._is_placeholder_showing():
             self.input_box.delete("1.0", tk.END)
 
+    def _guard_placeholder_keypress(self, event):
+        """Wipe the placeholder before the first real keystroke modifies it.
+        Lets navigation / modifier keys through unchanged."""
+        if not self._is_placeholder_showing():
+            return None
+        # Allow pure modifier / navigation keys without nuking the placeholder
+        navigation = {
+            "Shift_L", "Shift_R", "Control_L", "Control_R",
+            "Alt_L", "Alt_R", "Meta_L", "Meta_R", "Super_L", "Super_R",
+            "Caps_Lock", "Num_Lock",
+            "Left", "Right", "Up", "Down", "Home", "End",
+            "Page_Up", "Page_Down", "Tab", "Escape",
+        }
+        if event.keysym in navigation:
+            return None
+        # First real keystroke — clear placeholder, place caret at start, and
+        # let the keystroke proceed normally.
+        self._clear_placeholder()
+        self.input_box.mark_set(tk.INSERT, "1.0")
+
+    def _guard_placeholder_click(self, _event):
+        if self._is_placeholder_showing():
+            self._clear_placeholder()
+            self.input_box.mark_set(tk.INSERT, "1.0")
+
     # ── Rendering ─────────────────────────────────────────────────────────────
     def _write_output(self, text=""):
         self.output_box.configure(state="normal")
@@ -1344,6 +1386,26 @@ class TranslatorApp(_BaseTk):
         if text:
             self.output_box.insert(tk.END, text)
         self.output_box.configure(state="disabled")
+        self._refresh_output_stats(text or "")
+
+    def _refresh_output_stats(self, text=None):
+        """Show line / character counts in the bottom status bar.
+        Counts are computed from the actual output buffer when text is None."""
+        if text is None:
+            try:
+                text = self.output_box.get("1.0", tk.END).rstrip("\n")
+            except Exception:
+                text = ""
+        if not text:
+            self._sb_match.configure(text="")
+            return
+        lines = text.count("\n") + (0 if text.endswith("\n") else 1)
+        chars = len(text)
+        if chars >= 1000:
+            ch_str = f"{chars/1000:.1f}k chars"
+        else:
+            ch_str = f"{chars} chars"
+        self._sb_match.configure(text=f"{lines} lines · {ch_str}  ")
 
     def _get_output_without_unknown(self):
         """Return the output contents minus the 未定義 section."""
@@ -1599,12 +1661,14 @@ class TranslatorApp(_BaseTk):
 
     def _refresh_excl_btn(self):
         n = len(self._exclusions)
-        self._excl_btn.configure(text=f"⊘  Exclusions ({n})" if n else "⊘  Exclusions")
+        label = f"⊘  Exclusions… ({n})" if n else "⊘  Exclusions…"
+        self._settings_menu.entryconfigure(self._SETTINGS_IDX_EXCL, label=label)
 
     # ── User map button + dialog ──────────────────────────────────────────────
     def _refresh_umap_btn(self):
         n = len((self._user_map.get("tables") or {})) + len((self._user_map.get("columns") or {}))
-        self._umap_btn.configure(text=f"🖉  User Map ({n})" if n else "🖉  User Map")
+        label = f"🖉  User Map… ({n})" if n else "🖉  User Map…"
+        self._settings_menu.entryconfigure(self._SETTINGS_IDX_UMAP, label=label)
 
     def open_user_map_dialog(self):
         from .dialogs.user_map import open_user_map_dialog
@@ -1626,10 +1690,10 @@ class TranslatorApp(_BaseTk):
         parts = []
         if ns: parts.append(f"{ns}S")
         if nt: parts.append(f"{nt}T")
-        label = "⚙  Filter"
+        label = "⚙  Filter…"
         if parts:
             label += f" ({' / '.join(parts)})"
-        self._filter_btn.configure(text=label)
+        self._settings_menu.entryconfigure(self._SETTINGS_IDX_FILTER, label=label)
 
     def open_filter_dialog(self):
         from .dialogs.filter import open_filter_dialog
@@ -1702,6 +1766,50 @@ class TranslatorApp(_BaseTk):
     def show_help_dialog(self):
         from .dialogs.help import show_help_dialog
         show_help_dialog(self)
+
+    # ── Hover tooltips on buttons (delayed show, hide on leave) ───────────────
+    def _attach_tooltip(self, widget, text, delay_ms=500):
+        state = {"job": None}
+        def _enter(_e):
+            def _show():
+                state["job"] = None
+                try:
+                    x = widget.winfo_rootx() + 8
+                    y = widget.winfo_rooty() + widget.winfo_height() + 4
+                    self._tooltip.show(text, x, y)
+                except Exception:
+                    pass
+            state["job"] = widget.after(delay_ms, _show)
+        def _leave(_e):
+            if state["job"]:
+                try: widget.after_cancel(state["job"])
+                except Exception: pass
+                state["job"] = None
+            self._tooltip.hide()
+        widget.bind("<Enter>", _enter, add="+")
+        widget.bind("<Leave>", _leave, add="+")
+        widget.bind("<ButtonPress>", _leave, add="+")
+
+    def _install_button_tooltips(self):
+        pairs = [
+            (self._tab_table,    "Show original on the left and the translation on the right (Translation Table mode)"),
+            (self._tab_inline,   "Replace identifiers in place inside the original text (Inline Replace mode)"),
+            (self._tab_designdoc,"Generate a structured Japanese design document from SQL (Design Doc mode)"),
+            (self._tab_forward,  "Translate physical → logical names"),
+            (self._tab_reverse,  "Translate logical → physical names"),
+            (self._settings_btn, "Theme, layout, filter, exclusions, user map, file operations"),
+            (self._help_btn,     "Help & keyboard shortcuts (F1)"),
+            (self._translate_btn,"Translate the input (Ctrl+Enter)"),
+            (self._copy_btn,     "Copy output to clipboard (Ctrl+Shift+C)"),
+            (self._save_btn,     "Save output to a file (Ctrl+S)"),
+            (self._history_btn,  "Recent inputs"),
+            (self._doctabs_newbtn,"Open a new document tab"),
+        ]
+        for widget, text in pairs:
+            try:
+                self._attach_tooltip(widget, text)
+            except Exception:
+                pass
     def _refresh_index_stats(self):
         self._sb_index.configure(
             text=f"  ● {len(self.table_index)} tables · {len(self.column_index)} columns · "

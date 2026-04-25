@@ -12,6 +12,9 @@ def toggle_sections_popup(app):
 
     t = THEMES[app._theme]
     popup = tk.Toplevel(app)
+    # Hide until we've finished laying out and positioning — otherwise the
+    # window manager flashes it at its default (centered) location first.
+    popup.withdraw()
     popup.wm_overrideredirect(True)
     popup.attributes("-topmost", True)
     popup.configure(bg=t["muted_bg"])
@@ -50,14 +53,37 @@ def toggle_sections_popup(app):
     add_sep()
     add_check("■実行後処理",             app._show_footer)
 
-    # Position under the button
+    # Footer with explicit Done button (Esc / click-outside still work)
+    add_sep()
+    footer = tk.Frame(inner, bg=t["surface"])
+    footer.pack(fill="x", padx=6, pady=(2, 6))
+    done_btn = tk.Button(
+        footer, text="✓  Done", font=app._ui_b,
+        bg=t["accent"], fg=t["accent_fg"],
+        activebackground=t["accent"], activeforeground=t["accent_fg"],
+        relief="flat", bd=0, padx=14, pady=4, cursor="hand2",
+        command=lambda: popup.destroy(),
+    )
+    done_btn.pack(side="right")
+    hint = tk.Label(
+        footer, text="Esc to close", font=app._small,
+        bg=t["surface"], fg=t["fg_muted"],
+    )
+    hint.pack(side="left")
+
+    # Position under the button (still withdrawn — no flash)
     app.update_idletasks()
     btn = app._sections_mb
     px = btn.winfo_rootx()
     py = btn.winfo_rooty() + btn.winfo_height() + 2
     popup.wm_geometry(f"+{px}+{py}")
 
-    # Close on Escape
+    # Now reveal the popup at the correct location
+    popup.deiconify()
+
+    # Borderless Toplevels don't get keyboard focus by default, so force it
+    # before binding Escape locally — otherwise the keystroke goes elsewhere.
+    popup.focus_force()
     popup.bind("<Escape>", lambda e: popup.destroy())
 
     # Close when user clicks anywhere outside the popup (or the opener button).
