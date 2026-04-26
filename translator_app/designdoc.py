@@ -128,9 +128,19 @@ def _split_java_concat(expr):
 
 
 def _extract_appends(code):
-    """Return a list of arg-expressions for every `.append(...)` call."""
+    """Return a list of arg-expressions for every `.append(...)` call.
+    Receiver-agnostic — kept for backwards compatibility / fallback."""
+    return [arg for _recv, arg in _extract_appends_with_receiver(code)]
+
+
+def _extract_appends_with_receiver(code):
+    """Return [(receiver, arg)] for every `.append(...)` call.
+    The receiver is the variable name that owns the call. For chained calls
+    like `sb.append(x).append(y)` the second receiver is reported as the
+    same name as the first, so callers can group by buffer."""
     results = []
     i, n = 0, len(code)
+    last_receiver = None    # for chained .append(...).append(...)
     while i < n:
         idx = code.find('.append', i)
         if idx == -1:
@@ -141,6 +151,21 @@ def _extract_appends(code):
             j += 1
         if j >= n or code[j] != '(':
             i = idx + 1; continue
+
+        # Determine the receiver — walk backwards from the dot.
+        k = idx - 1
+        while k >= 0 and code[k].isspace():
+            k -= 1
+        receiver = ""
+        if k >= 0 and code[k] == ')':
+            # Chained call: previous append closed here. Reuse last receiver.
+            receiver = last_receiver or ""
+        elif k >= 0 and (code[k].isalnum() or code[k] == '_'):
+            end_id = k + 1
+            while k >= 0 and (code[k].isalnum() or code[k] == '_'):
+                k -= 1
+            receiver = code[k + 1:end_id]
+
         j += 1
         start = j; depth = 1
         in_str = in_char = False
@@ -164,7 +189,9 @@ def _extract_appends(code):
                     j += 1
                 else: j += 1
         if depth == 0:
-            results.append(code[start:j])
+            results.append((receiver, code[start:j]))
+            if receiver:
+                last_receiver = receiver
         i = j + 1
     return results
 
@@ -218,29 +245,121 @@ def _parse_function_sig(code):
     return {"name": name, "params": params}
 
 
+_TOSTRING_RE = re.compile(r'^\s*([A-Za-z_][A-Za-z_0-9]*)\s*\.\s*toString\s*\(\s*\)\s*$')
+
+
 def _build_sql_from_java(java_code):
     """Extract concatenated SQL with markers for embedded Java expressions.
     Returns (sql_text, expr_map, javadoc_info, func_info)."""
     javadoc = _parse_javadoc(java_code)
     func    = _parse_function_sig(java_code)
     clean   = _strip_java_comments(java_code)
-    appends = _extract_appends(clean)
+    appends = _extract_appends_with_receiver(clean)
 
-    parts, expr_map, counter = [], {}, [0]
+    # Group raw append args by receiver so we can splice helper StringBuffers
+    # in when the main buffer does `sql.append(other.toString())`.
+    by_buffer = {}
+    order = []
+    for recv, arg in appends:
+        if not recv:
+            continue
+        if recv not in by_buffer:
+            by_buffer[recv] = []
+            order.append(recv)
+        by_buffer[recv].append(arg)
+
+    # Identify the main buffer. Tried in order:
+    #   1. `return <buf>.toString()` — direct return of the buffer.
+    #   2. The buffer that consumes the most other buffers via
+    #      `<buf>.append(<other>.toString())` (i.e. the one doing the
+    #      splicing — its content includes the helper buffers).
+    #   3. Any `<buf>.toString()` call site referencing a known buffer
+    #      (e.g. `dataBase.getPrepareStatement(<buf>.toString())`),
+    #      excluding those nested inside .append(...).
+    #   4. Fallback: buffer with the most appends.
+    main_buffer = None
+    rm = re.search(
+        r'return\s+([A-Za-z_][A-Za-z_0-9]*)\s*\.\s*toString\s*\(',
+        clean,
+    )
+    if rm and rm.group(1) in by_buffer:
+        main_buffer = rm.group(1)
+    if main_buffer is None and by_buffer:
+        # Count how many other-buffer .toString() splices each buffer contains.
+        consume_count = {b: 0 for b in by_buffer}
+        for buf, args in by_buffer.items():
+            for arg in args:
+                for tok in _split_java_concat(arg):
+                    m = _TOSTRING_RE.match(tok.strip())
+                    if m and m.group(1) in by_buffer and m.group(1) != buf:
+                        consume_count[buf] += 1
+        best = max(consume_count.values()) if consume_count else 0
+        if best > 0:
+            main_buffer = next(b for b in order if consume_count[b] == best)
+    if main_buffer is None:
+        # Find any <buf>.toString() reference that isn't the argument of a
+        # `.append(`. Use that buffer as the main — typical for code that
+        # passes the SQL to a JDBC helper instead of returning it directly.
+        for m in re.finditer(
+            r'([A-Za-z_][A-Za-z_0-9]*)\s*\.\s*toString\s*\(',
+            clean,
+        ):
+            buf = m.group(1)
+            if buf not in by_buffer:
+                continue
+            # Walk back to see if this is inside an `.append(` argument.
+            preceding = clean[:m.start()]
+            in_append = re.search(
+                r'\.\s*append\s*\(\s*$',
+                preceding,
+            )
+            if not in_append:
+                main_buffer = buf
+                break
+    if main_buffer is None or main_buffer not in by_buffer:
+        main_buffer = max(order, key=lambda b: len(by_buffer[b])) if order else None
+
+    expr_map, counter = {}, [0]
     def add(e):
         idx = counter[0]; counter[0] += 1
         expr_map[idx] = e.strip()
         return f"{_EXPR_OPEN}{idx}{_EXPR_CLOSE}"
 
-    for arg in appends:
-        for tok in _split_java_concat(arg):
-            tok = tok.strip()
-            if not tok:
-                continue
-            if tok.startswith('"') and tok.endswith('"'):
-                parts.append(_parse_java_string(tok))
-            else:
+    def _emit_buffer(buf_name, parts, visited):
+        """Recursively emit appends for a buffer, inlining other-buffer
+        toString() references. `visited` guards against cycles."""
+        if not buf_name or buf_name in visited:
+            return
+        visited.add(buf_name)
+        for arg in by_buffer.get(buf_name, []):
+            for tok in _split_java_concat(arg):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                if tok.startswith('"') and tok.endswith('"'):
+                    parts.append(_parse_java_string(tok))
+                    continue
+                m = _TOSTRING_RE.match(tok)
+                if m and m.group(1) in by_buffer:
+                    # Splice the referenced buffer's contents in place.
+                    _emit_buffer(m.group(1), parts, visited)
+                    continue
                 parts.append(add(tok))
+
+    parts = []
+    if main_buffer:
+        _emit_buffer(main_buffer, parts, set())
+    else:
+        # Fallback: flatten everything (no receivers detected at all).
+        for _recv, arg in appends:
+            for tok in _split_java_concat(arg):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                if tok.startswith('"') and tok.endswith('"'):
+                    parts.append(_parse_java_string(tok))
+                else:
+                    parts.append(add(tok))
 
     sql = "".join(parts)
     # Strip SQL single-quotes that wrap a pure placeholder: `'<mark>'` → `<mark>`.
@@ -412,10 +531,21 @@ def _parse_from_clause(text):
     text = text.strip()
     join_kws = [kw for kw, _ in JOIN_PATTERNS]
     positions = _kw_positions(text, join_kws)
+    pre = text[:positions[0][0]].strip() if positions else text
+
+    # Old-style comma-separated FROM (cross-join syntax). Split at top-level
+    # commas so each table gets its own ref instead of leaking commas into
+    # the alias of the first one.
+    pre_pieces = _split_commas_top(pre) if pre else []
+    if not pre_pieces:
+        main, cross = {"table": "", "alias": ""}, []
+    else:
+        main = _parse_table_ref(pre_pieces[0])
+        cross = [_parse_table_ref(p) for p in pre_pieces[1:]]
+
     if not positions:
-        return {"main": _parse_table_ref(text), "joins": []}
-    first = positions[0]
-    main = _parse_table_ref(text[:first[0]].strip())
+        return {"main": main, "joins": [], "cross": cross}
+
     joins = []
     for i, (s, e, kw) in enumerate(positions):
         nxt = positions[i+1][0] if i+1 < len(positions) else len(text)
@@ -431,12 +561,16 @@ def _parse_from_clause(text):
             "table_ref": _parse_table_ref(table_part),
             "on":        _parse_conditions(on_part) if on_part else [],
         })
-    return {"main": main, "joins": joins}
+    return {"main": main, "joins": joins, "cross": cross}
 
 
 def _parse_sql(sql):
     sql = re.sub(r'/\*\+.*?\*/', ' ', sql, flags=re.DOTALL)
     sql = re.sub(r'\s+', ' ', sql).strip()
+    # Peel off any outer parenthesised wrappers — a whole SELECT/UNION block
+    # is sometimes built as `( ... )` (typical when used as a subquery later).
+    while _is_paren_group(sql):
+        sql = sql[1:-1].strip()
     if not sql:
         return {"type": "UNKNOWN"}
     u = sql.lstrip().upper()
@@ -452,17 +586,40 @@ def _parse_sql(sql):
 
 def _parse_insert(sql):
     m = re.match(
-        r'INSERT\s+(?:INTO\s+)?(\S+)(?:\s+NOLOGGING)?\s*(?:\(([^)]*)\))?\s*(.*)',
-        sql, re.IGNORECASE | re.DOTALL
+        r'INSERT\s+(?:INTO\s+)?(\S+)(?:\s+NOLOGGING)?\s*',
+        sql, re.IGNORECASE | re.DOTALL,
     )
     if not m:
         return {"type": "INSERT", "raw": sql}
-    result = {
-        "type":    "INSERT",
-        "target":  m.group(1),
-        "columns": [c.strip() for c in (m.group(2) or "").split(',') if c.strip()],
-    }
-    rest = (m.group(3) or "").strip()
+    result = {"type": "INSERT", "target": m.group(1), "columns": []}
+    rest = sql[m.end():].lstrip()
+
+    # Optional parenthesised chunk right after the target. It can be either:
+    #   - a column list:   INSERT INTO t (a, b, c) VALUES (...)
+    #   - a wrapped SELECT: INSERT INTO t (SELECT ... FROM ...)
+    # We need real paren-matching here because a regex `[^)]*` chokes on
+    # nested parens like NVL(col, 0).
+    if rest.startswith('('):
+        depth = 0; end = -1
+        for i, c in enumerate(rest):
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end > 0:
+            inside = rest[1:end].strip()
+            after  = rest[end + 1:].strip()
+            if inside.upper().lstrip().startswith('SELECT'):
+                # Wrapped sub-select — the parens just group the SELECT.
+                result["select"] = _parse_select(inside)
+                return result
+            # Column list; trailing `after` should hold VALUES/SELECT.
+            result["columns"] = [c.strip() for c in _split_commas_top(inside) if c.strip()]
+            rest = after
+
     if rest:
         u = rest.lstrip().upper()
         if u.startswith('VALUES'):
@@ -475,10 +632,18 @@ def _parse_insert(sql):
 
 
 def _parse_update(sql):
-    m = re.match(r'UPDATE\s+(\S+)\s+SET\s+(.*)', sql, re.IGNORECASE | re.DOTALL)
+    # Allow an optional table alias between the target and SET, e.g.
+    #   UPDATE my_table TR SET ...
+    #   UPDATE my_table AS tr SET ...
+    # The negative lookahead on `SET` keeps us from swallowing the keyword
+    # itself when no alias is present.
+    m = re.match(
+        r'UPDATE\s+(\S+)(?:\s+(?:AS\s+)?(?!SET\b)(\S+))?\s+SET\s+(.*)',
+        sql, re.IGNORECASE | re.DOTALL,
+    )
     if not m:
         return {"type": "UPDATE", "raw": sql}
-    target, rest = m.group(1), m.group(2).strip()
+    target, alias, rest = m.group(1), m.group(2), m.group(3).strip()
     where_text = ""
     wm = re.search(r'\bWHERE\b', rest, re.IGNORECASE)
     if wm and _is_top_level(rest, wm.start()):
@@ -491,6 +656,8 @@ def _parse_update(sql):
         if em:
             assignments.append({"col": em.group(1).strip(), "value": em.group(2).strip()})
     out = {"type": "UPDATE", "target": target, "set": assignments}
+    if alias:
+        out["alias"] = alias
     if where_text:
         out["where"] = _parse_conditions(where_text)
     return out
@@ -601,8 +768,8 @@ def _translate_in_text(text, translate_fn, uppercase=False):
                 hint = alias_map[left.upper()]
                 col_translated = translate_fn(right, _hint_table=hint)
                 if col_translated != right:
-                    return f"{left}.{col_translated}"
-                return f"{left}.{_cased(right)}"
+                    return f"{_cased(left)}.{col_translated}"
+                return f"{_cased(left)}.{_cased(right)}"
             # Unknown alias: translate each half independently
             l_tr = translate_fn(left)
             r_tr = translate_fn(right)
@@ -614,7 +781,19 @@ def _translate_in_text(text, translate_fn, uppercase=False):
             return translated
         return _cased(left)
 
-    pattern = re.compile(r'\b([A-Za-z_][A-Za-z_0-9]*)(?:\.([A-Za-z_][A-Za-z_0-9]*))?\b')
+    # Match either a single-quoted SQL string literal OR an identifier
+    # (optionally with a `alias.col` qualifier). String literals are
+    # passed through untouched so we never alter the value of `'Active'` etc.
+    pattern = re.compile(
+        r"'(?:[^'\\]|\\.)*'"
+        r"|\b([A-Za-z_][A-Za-z_0-9]*)(?:\.([A-Za-z_][A-Za-z_0-9]*))?\b"
+    )
+
+    def _sub_keep_strings(m):
+        if m.group(0).startswith("'"):
+            return m.group(0)
+        return sub(m)
+
     while i < n:
         if text[i] == _EXPR_OPEN:
             end = text.find(_EXPR_CLOSE, i)
@@ -627,16 +806,24 @@ def _translate_in_text(text, translate_fn, uppercase=False):
             lit_end = i
             while lit_end < n and text[lit_end] != _EXPR_OPEN:
                 lit_end += 1
-            result.append(pattern.sub(sub, text[i:lit_end]))
+            result.append(pattern.sub(_sub_keep_strings, text[i:lit_end]))
             i = lit_end
     return "".join(result)
 
 
 def _render_placeholders(text, expr_map, translate_fn=None, uppercase=False):
     """Replace \\uE001N\\uE002 markers with rendered Java expressions.
-    When a marker is adjacent to literal text, emit ' + ' between them."""
+    When a marker is adjacent to a literal that contains real content, emit
+    ' + ' between them so the design-doc preserves the Java concatenation
+    structure. Purely structural punctuation (parens, commas, whitespace) is
+    treated as part of the SQL — emitted verbatim with no ' + ' decoration."""
     if _EXPR_OPEN not in text:
         return text
+
+    def _is_structural(s):
+        # Empty or whitespace-only counts as no content.
+        return all(c in "()[]{},* \t\n\r" for c in s)
+
     out = []
     i, n = 0, len(text)
     last_kind = None  # 'lit' | 'expr'
@@ -647,7 +834,9 @@ def _render_placeholders(text, expr_map, translate_fn=None, uppercase=False):
                 out.append(text[i]); i += 1; continue
             idx = int(text[i+1:end])
             rendered = _render_expr(expr_map.get(idx, ""), translate_fn, uppercase)
-            if last_kind == 'lit' and out and out[-1].rstrip():
+            # Decorate with ' + ' only when the preceding literal has real,
+            # non-structural content (avoids ugly `( + expr + )` for IN-lists).
+            if last_kind == 'lit' and out and not _is_structural(out[-1]):
                 out[-1] = out[-1].rstrip()
                 out.append(" + ")
             out.append(rendered)
@@ -658,7 +847,7 @@ def _render_placeholders(text, expr_map, translate_fn=None, uppercase=False):
             while lit_end < n and text[lit_end] != _EXPR_OPEN:
                 lit_end += 1
             lit = text[i:lit_end]
-            if last_kind == 'expr' and lit.strip():
+            if last_kind == 'expr' and lit.strip() and not _is_structural(lit):
                 out.append(" + ")
                 out.append(lit.strip())
             else:
@@ -669,8 +858,11 @@ def _render_placeholders(text, expr_map, translate_fn=None, uppercase=False):
 
 
 def _render_value(text, expr_map, translate_fn, uppercase=False):
-    """Render a value expression: translate names AND expand placeholders."""
-    t = _translate_in_text(text, translate_fn, uppercase=False)  # don't uppercase expression contents
+    """Render a value expression: translate names AND expand placeholders.
+    Identifier tokens (e.g. `sub.bumon_cd` on the right side of a comparison)
+    do honour the uppercase flag — Java placeholder contents are still kept
+    case-sensitive because they may be method names or class references."""
+    t = _translate_in_text(text, translate_fn, uppercase=uppercase)
     return _render_placeholders(t, expr_map, translate_fn, uppercase)
 
 
@@ -711,10 +903,19 @@ def _emit_condition_line(cond, expr_map, translate_fn, uppercase, first_prefix="
     left  = _translate_in_text(cond.get("left", ""), translate_fn, uppercase=uppercase)
     left  = _render_placeholders(left, expr_map)
     op    = cond.get("op", "").strip()
-    disp  = "＝" if op == "=" else op
-    right = _render_value(cond.get("right", ""), expr_map, translate_fn)
+    if op == "=":
+        disp = "＝"
+    elif uppercase and op:
+        # Normalize SQL keyword operators (IS NULL, BETWEEN, IN, LIKE, ...)
+        # to upper case so the doc reads consistently.
+        disp = re.sub(r'\s+', ' ', op.upper())
+    else:
+        disp = op
+    right = _render_value(cond.get("right", ""), expr_map, translate_fn, uppercase=uppercase)
 
     conn = cond.get("connector", "") or ""
+    if uppercase and conn:
+        conn = conn.upper()
     if first_prefix:
         label = first_prefix + left
     elif conn:
@@ -730,13 +931,90 @@ def _emit_condition_line(cond, expr_map, translate_fn, uppercase, first_prefix="
 _LONG_THRESHOLD = 10  # > 10 items → move projection section to the end
 
 
+_EXISTS_RE = re.compile(r'^\s*((?:NOT\s+)?EXISTS)\s*\((.*)\)\s*$', re.IGNORECASE | re.DOTALL)
+
+
+def _is_paren_group(body):
+    """True if the entire body is wrapped by a single matching pair of
+    parentheses at the top level (so it represents a grouped sub-condition,
+    not an IN-list or function call)."""
+    body = body.strip()
+    if not body.startswith('(') or not body.endswith(')'):
+        return False
+    depth = 0
+    for i, c in enumerate(body):
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return i == len(body) - 1
+    return False
+
+
+def _emit_condition_lines(cond, expr_map, translate_fn, uppercase, indent=0, flags=None):
+    """Render a single condition. Returns a list of lines so EXISTS / NOT EXISTS
+    subqueries and parenthesised groups (a OR b) can be expanded across multiple
+    lines instead of being crammed onto one."""
+    body = cond.get("raw", "") or ""
+    conn = cond.get("connector", "") or ""
+    ind  = _TAB * indent
+
+    # Parenthesised group:   (a OR b)   →   (   /   a   /   OR b   /   )
+    if not cond.get("op") and _is_paren_group(body):
+        inner = body.strip()[1:-1].strip()
+        sub_conds = _parse_conditions(inner)
+        if sub_conds:
+            out = [ind + ((conn + " ") if conn else "") + "("]
+            for sc in sub_conds:
+                out.extend(_emit_condition_lines(
+                    sc, expr_map, translate_fn, uppercase,
+                    indent=indent + 1, flags=flags,
+                ))
+            out.append(ind + ")")
+            return out
+
+    # EXISTS / NOT EXISTS subquery
+    m = _EXISTS_RE.match(body)
+    if m and not cond.get("op"):
+        kw = m.group(1).upper().replace("  ", " ")
+        inner = m.group(2).strip()
+        try:
+            sub = _parse_sql(inner)
+        except Exception:
+            sub = None
+        if sub and sub.get("type") == "SELECT":
+            header = (conn + " " if conn else "") + kw + " ("
+            out = [ind + header]
+            sub_flags = dict(flags or {})
+            # Inside an EXISTS we don't want the "■処理区分 SELECT" header
+            # to repeat — the EXISTS keyword already scopes the subquery.
+            sub_flags["show_stype"] = False
+            out.extend(_emit_select_or_union(
+                sub, expr_map, translate_fn, uppercase,
+                indent=indent + 1, flags=sub_flags,
+            ))
+            out.append(ind + ")")
+            return out
+
+    # Default — single line
+    return [ind + _emit_condition_line(cond, expr_map, translate_fn, uppercase).lstrip()]
+
+
 def _emit_update(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
     flags = flags or {}
     def _emit_target():
         if not flags.get("show_target", True):
             return
         lines.append("■更新テーブル")
-        lines.append(_TAB + _render_target(parsed.get("target", ""), expr_map, translate_fn, uppercase))
+        target_str = _render_target(parsed.get("target", ""), expr_map, translate_fn, uppercase)
+        alias = parsed.get("alias")
+        if alias:
+            # Show the alias so readers can map TR.xxx references in WHERE
+            # back to this table.
+            shown_alias = alias.upper() if uppercase else alias
+            target_str = f"{target_str}  （別名：{shown_alias}）"
+        lines.append(_TAB + target_str)
         lines.append("")
 
     def _emit_set():
@@ -746,7 +1024,7 @@ def _emit_update(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
         lines.append(_TAB + "カラム名" + _COL_TABS + "セット内容")
         for a in parsed.get("set", []):
             col = _render_name(a["col"], translate_fn, uppercase)
-            val = _render_value(a["value"], expr_map, translate_fn)
+            val = _render_value(a["value"], expr_map, translate_fn, uppercase=uppercase)
             lines.append(_TAB + col + _COL_TABS + val)
         lines.append("")
 
@@ -755,7 +1033,7 @@ def _emit_update(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
             return
         lines.append("■抽出条件")
         for c in parsed["where"]:
-            lines.append(_emit_condition_line(c, expr_map, translate_fn, uppercase))
+            lines.extend(_emit_condition_lines(c, expr_map, translate_fn, uppercase, indent=1, flags=flags))
         lines.append("")
 
     _emit_target()
@@ -781,7 +1059,7 @@ def _emit_delete(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
     if flags.get("show_where", True) and parsed.get("where"):
         lines.append("■抽出条件")
         for c in parsed["where"]:
-            lines.append(_emit_condition_line(c, expr_map, translate_fn, uppercase))
+            lines.extend(_emit_condition_lines(c, expr_map, translate_fn, uppercase, indent=1, flags=flags))
         lines.append("")
 
     if flags.get("show_footer", True):
@@ -804,8 +1082,12 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
 
     def _emit_table_ref_item(ref):
         """Render one table reference. Recursively handles (subquery) [AS] alias."""
+        def _alias_str(a):
+            if not a:
+                return ""
+            return a.upper() if uppercase else a
         if ref.get("subquery"):
-            alias = ref.get("alias", "")
+            alias = _alias_str(ref.get("alias", ""))
             out.append(ind + _TAB + "(")
             out.extend(_emit_select_or_union(
                 ref["subquery"], expr_map, translate_fn, uppercase,
@@ -814,7 +1096,7 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
             out.append(ind + _TAB + ")" + (_COL_TABS + alias if alias else ""))
         else:
             tbl = _render_name(ref.get("table", ""), translate_fn, uppercase, expr_map)
-            alias = ref.get("alias", "")
+            alias = _alias_str(ref.get("alias", ""))
             out.append(ind + _TAB + tbl + (_COL_TABS + alias if alias else ""))
 
     def _emit_projection():
@@ -822,7 +1104,7 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
             return
         out.append(ind + "■抽出項目" + distinct_str)
         for f in parsed.get("fields", []):
-            out.append(ind + _TAB + _render_value(f, expr_map, translate_fn))
+            out.append(ind + _TAB + _render_value(f, expr_map, translate_fn, uppercase=uppercase))
         out.append("")
 
     def _emit_from_and_join():
@@ -832,6 +1114,9 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
         if flags.get("show_from", True):
             out.append(ind + "■抽出テーブル")
             _emit_table_ref_item(from_info["main"])
+            # Old-style comma-separated FROM tables (cross-join syntax).
+            for ref in from_info.get("cross", []) or []:
+                _emit_table_ref_item(ref)
             out.append("")
         if flags.get("show_join", True) and from_info.get("joins"):
             out.append(ind + "■結合条件")
@@ -849,28 +1134,32 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
         if flags.get("show_where", True) and parsed.get("where"):
             out.append(ind + "■抽出条件")
             for c in parsed["where"]:
-                out.append(ind + _TAB + _emit_condition_line(c, expr_map, translate_fn, uppercase).lstrip())
+                out.extend(_emit_condition_lines(
+                    c, expr_map, translate_fn, uppercase,
+                    indent=indent + 1, flags=flags))
             out.append("")
 
     def _emit_group():
         if flags.get("show_group", True) and parsed.get("group_by"):
             out.append(ind + "■グループ化条件")
             for g in parsed["group_by"]:
-                out.append(ind + _TAB + _render_value(g, expr_map, translate_fn))
+                out.append(ind + _TAB + _render_value(g, expr_map, translate_fn, uppercase=uppercase))
             out.append("")
 
     def _emit_having():
         if flags.get("show_having", True) and parsed.get("having"):
             out.append(ind + "■集計後抽出条件")
             for c in parsed["having"]:
-                out.append(ind + _TAB + _emit_condition_line(c, expr_map, translate_fn, uppercase).lstrip())
+                out.extend(_emit_condition_lines(
+                    c, expr_map, translate_fn, uppercase,
+                    indent=indent + 1, flags=flags))
             out.append("")
 
     def _emit_order():
         if flags.get("show_order", True) and parsed.get("order_by"):
             out.append(ind + "■並び順")
             for o in parsed["order_by"]:
-                out.append(ind + _TAB + _render_value(o, expr_map, translate_fn))
+                out.append(ind + _TAB + _render_value(o, expr_map, translate_fn, uppercase=uppercase))
             out.append("")
 
     # Projection at end only when there are many fields (> _LONG_THRESHOLD)
@@ -948,11 +1237,11 @@ def _emit_insert(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
         if fields:
             for i, f in enumerate(fields):
                 lines.append(_TAB + col_label(i, f) + _COL_TABS +
-                             _render_value(f, expr_map, translate_fn))
+                             _render_value(f, expr_map, translate_fn, uppercase=uppercase))
         elif values:
             for i, v in enumerate(values):
                 lines.append(_TAB + col_label(i, v) + _COL_TABS +
-                             _render_value(v, expr_map, translate_fn))
+                             _render_value(v, expr_map, translate_fn, uppercase=uppercase))
         lines.append("")
 
     _emit_target()
@@ -1144,7 +1433,8 @@ def java_to_design_doc(
     stype = parsed.get("type", "")
     if show_stype:
         lines.append("■処理区分")
-        lines.append(_TAB + stype)
+        # SELECT_UNION is an internal classification; users see plain SELECT.
+        lines.append(_TAB + ("SELECT" if stype == "SELECT_UNION" else stype))
         lines.append("")
 
     # Bundle section flags for the emit functions
@@ -1165,7 +1455,10 @@ def java_to_design_doc(
     elif stype == "INSERT":       _emit_insert(parsed, expr_map, translate_fn, uppercase, lines, flags)
     elif stype == "DELETE":       _emit_delete(parsed, expr_map, translate_fn, uppercase, lines, flags)
     elif stype in ("SELECT", "SELECT_UNION"):
-        lines.extend(_emit_select_or_union(parsed, expr_map, translate_fn, uppercase, indent=0, flags=flags))
+        # The top-level "■処理区分 SELECT" header was already emitted above,
+        # so suppress the duplicate one inside _emit_select_block.
+        sel_flags = dict(flags); sel_flags["show_stype"] = False
+        lines.extend(_emit_select_or_union(parsed, expr_map, translate_fn, uppercase, indent=0, flags=sel_flags))
     elif stype == "TRUNCATE":
         if show_target:
             lines.append("■対象テーブル")

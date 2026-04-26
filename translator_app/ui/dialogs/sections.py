@@ -71,11 +71,31 @@ def toggle_sections_popup(app):
     )
     hint.pack(side="left")
 
-    # Position under the button (still withdrawn — no flash)
+    # Position under the button (still withdrawn — no flash). If there isn't
+    # enough room below (e.g. horizontal-pane layout pushes the action bar near
+    # the bottom of the screen), flip above the button. Also clamp to the
+    # screen on the right edge so the popup never spills off-screen.
     app.update_idletasks()
     btn = app._sections_mb
-    px = btn.winfo_rootx()
-    py = btn.winfo_rooty() + btn.winfo_height() + 2
+    pop_w = popup.winfo_reqwidth()
+    pop_h = popup.winfo_reqheight()
+    sw, sh = popup.winfo_screenwidth(), popup.winfo_screenheight()
+
+    btn_x = btn.winfo_rootx()
+    btn_y = btn.winfo_rooty()
+    btn_h = btn.winfo_height()
+
+    # Vertical: prefer below, fall back to above when not enough room.
+    py = btn_y + btn_h + 2
+    if py + pop_h > sh - 4:
+        above_y = btn_y - pop_h - 2
+        if above_y >= 4:
+            py = above_y
+        else:
+            py = max(4, sh - pop_h - 4)
+    # Horizontal: keep within the screen.
+    px = max(4, min(btn_x, sw - pop_w - 4))
+
     popup.wm_geometry(f"+{px}+{py}")
 
     # Now reveal the popup at the correct location
