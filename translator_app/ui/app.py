@@ -76,6 +76,18 @@ class TranslatorApp(_BaseTk):
         self._show_line_numbers = tk.BooleanVar(
             value=bool(self._settings.get("show_line_numbers", False))
         )
+        # Word-wrap toggle (default on)
+        self._word_wrap = tk.BooleanVar(
+            value=bool(self._settings.get("word_wrap", True))
+        )
+        # Auto-paste-on-focus toggle (default off — only triggers when content
+        # looks like SQL / Java SQL-builder, see _looks_pasteable)
+        self._auto_paste = tk.BooleanVar(
+            value=bool(self._settings.get("auto_paste", False))
+        )
+        # Tracks the last clipboard content the auto-paste considered, so we
+        # don't repeatedly re-paste the same thing on every focus event.
+        self._last_clip_seen = ""
 
         # Transient state
         self._copy_job     = None
@@ -152,6 +164,15 @@ class TranslatorApp(_BaseTk):
         self._set_direction_label()
         self._show_placeholder_if_empty()
         self._apply_line_numbers()
+        # Apply saved word-wrap state silently (skip the toast on startup).
+        self._apply_word_wrap(show_toast=False)
+        # Listen for window-level focus changes for the auto-paste feature.
+        self.bind("<FocusIn>", self._on_window_focus_in, add="+")
+        # FocusIn doesn't fire on macOS when a child keeps focus across an
+        # app-switch, so back it up with a low-frequency clipboard poll.
+        self._auto_paste_poll_id = None
+        if bool(self._auto_paste.get()):
+            self._start_auto_paste_poll()
 
         # Bindings
         self.input_box.bind("<Control-Return>", self._on_ctrl_enter)
@@ -216,6 +237,14 @@ class TranslatorApp(_BaseTk):
 
         # Save settings on exit
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Cmd+Q on macOS frequently bypasses WM_DELETE_WINDOW. Bind it (and
+        # Ctrl+Q on other platforms) to the same close handler so the doc-tab
+        # input is captured before the process exits.
+        self.bind_all("<Command-q>",     lambda e: self.on_close())
+        self.bind_all("<Command-Q>",     lambda e: self.on_close())
+        self.bind_all("<Control-q>",     lambda e: self.on_close())
+        # Pending auto-save handle for doc-tab input.
+        self._docs_save_job = None
 
     # ── Data loading ──────────────────────────────────────────────────────────
     def _load_data(self):
@@ -284,15 +313,33 @@ class TranslatorApp(_BaseTk):
         self._settings_menu = tk.Menu(self._settings_btn, tearoff=0)
         self._settings_btn["menu"] = self._settings_menu
         # Items — indices used by the refresh helpers below
-        self._SETTINGS_IDX_THEME  = 0
-        self._SETTINGS_IDX_LAYOUT = 1
-        # idx 2 = separator
-        self._SETTINGS_IDX_FILTER = 3
-        self._SETTINGS_IDX_EXCL   = 4
-        self._SETTINGS_IDX_UMAP   = 5
-        # idx 6 = separator, then file ops (Open, Reload JSON)
+        self._SETTINGS_IDX_THEME      = 0
+        self._SETTINGS_IDX_LAYOUT     = 1
+        self._SETTINGS_IDX_LINENO     = 2
+        self._SETTINGS_IDX_WRAP       = 3
+        self._SETTINGS_IDX_AUTOPASTE  = 4
+        # idx 5 = separator
+        self._SETTINGS_IDX_FILTER     = 6
+        self._SETTINGS_IDX_EXCL       = 7
+        self._SETTINGS_IDX_UMAP       = 8
+        # idx 9 = separator, then file ops (Open, Reload JSON)
         self._settings_menu.add_command(label="Theme",  command=self.toggle_theme)
         self._settings_menu.add_command(label="Layout", command=self.toggle_pane_orient)
+        self._settings_menu.add_checkbutton(
+            label="Line numbers (Ctrl+L)",
+            variable=self._show_line_numbers,
+            command=self._on_line_numbers_toggle_from_menu,
+        )
+        self._settings_menu.add_checkbutton(
+            label="Word wrap",
+            variable=self._word_wrap,
+            command=self._apply_word_wrap,
+        )
+        self._settings_menu.add_checkbutton(
+            label="Auto-paste from clipboard",
+            variable=self._auto_paste,
+            command=self._on_auto_paste_toggle,
+        )
         self._settings_menu.add_separator()
         self._settings_menu.add_command(label="⚙  Filter…",     command=self.open_filter_dialog)
         self._settings_menu.add_command(label="⊘  Exclusions…", command=self.open_exclusions_dialog)
@@ -369,6 +416,11 @@ class TranslatorApp(_BaseTk):
         self._input_lnums = LineNumberCanvas(
             self._input_container, self.input_box, lambda: THEMES[self._theme]
         )  # packed / unpacked by _apply_line_numbers()
+        # Horizontal scrollbar — only shown when word-wrap is off.
+        self._input_hscroll = tk.Scrollbar(
+            self._input_container, orient="horizontal",
+            command=self.input_box.xview,
+        )
 
         self._translate_btn = tk.Button(self._actionbar, text="▶  Translate  ·  Ctrl+Enter",
             font=self._btn, relief="flat", padx=20, pady=6, cursor="hand2", bd=0,
@@ -481,6 +533,11 @@ class TranslatorApp(_BaseTk):
         self._output_lnums = LineNumberCanvas(
             self._output_container, self.output_box, lambda: THEMES[self._theme]
         )  # packed / unpacked by _apply_line_numbers()
+        # Horizontal scrollbar — only shown when word-wrap is off.
+        self._output_hscroll = tk.Scrollbar(
+            self._output_container, orient="horizontal",
+            command=self.output_box.xview,
+        )
 
         # ── Status bar ──
         self._statusbar = tk.Frame(self, height=26)
@@ -695,6 +752,152 @@ class TranslatorApp(_BaseTk):
             "Line numbers " + ("on" if self._show_line_numbers.get() else "off"),
             900, "info",
         )
+        self._persist_pref("show_line_numbers", bool(self._show_line_numbers.get()))
+
+    def _on_line_numbers_toggle_from_menu(self):
+        # The menu's checkbutton already flipped the BooleanVar; just apply +
+        # toast (avoid double-toggling like toggle_line_numbers would).
+        self._apply_line_numbers()
+        self._toast.show(
+            "Line numbers " + ("on" if self._show_line_numbers.get() else "off"),
+            900, "info",
+        )
+        self._persist_pref("show_line_numbers", bool(self._show_line_numbers.get()))
+
+    # ── Word wrap ─────────────────────────────────────────────────────────────
+    def _apply_word_wrap(self, show_toast=True):
+        use_wrap = bool(self._word_wrap.get())
+        wrap_mode = tk.WORD if use_wrap else tk.NONE
+        for box, hsb in (
+            (self.input_box,  self._input_hscroll),
+            (self.output_box, self._output_hscroll),
+        ):
+            try:
+                box.configure(wrap=wrap_mode)
+            except Exception:
+                pass
+            if use_wrap:
+                # Hide horizontal scrollbar; keep ScrolledText's built-in
+                # vertical scroll untouched.
+                try:
+                    hsb.pack_forget()
+                    box.configure(xscrollcommand="")
+                except Exception:
+                    pass
+            else:
+                try:
+                    box.configure(xscrollcommand=hsb.set)
+                    # The text widget was packed first with fill="both" and
+                    # grabbed the whole container — packing the scrollbar
+                    # plainly leaves it as a sliver in the corner. `before=box`
+                    # inserts the scrollbar earlier in the pack slot list so
+                    # it claims the bottom edge first; the text re-flows above.
+                    hsb.pack(side="bottom", fill="x", before=box)
+                except Exception:
+                    pass
+        if show_toast:
+            self._toast.show(
+                "Word wrap " + ("on" if use_wrap else "off"),
+                900, "info",
+            )
+            # Persist immediately so user choice survives crashes / forced
+            # quits — `on_close` may be skipped if the process is killed.
+            self._persist_pref("word_wrap", use_wrap)
+
+    def _persist_pref(self, key, value):
+        """Update a single setting key and write the file right away."""
+        try:
+            self._settings[key] = value
+            save_settings(self._settings)
+        except Exception:
+            pass
+
+    # ── Auto-paste from clipboard ─────────────────────────────────────────────
+    _SQL_KW_RE = re.compile(
+        r'\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|GROUP\s+BY|ORDER\s+BY|VALUES|TRUNCATE)\b',
+        re.IGNORECASE,
+    )
+    _JAVA_SQL_HINT_RE = re.compile(
+        r'(StringBuffer|StringBuilder|\.append\s*\(|sb\.append|sql\.append)',
+    )
+
+    def _looks_pasteable(self, text):
+        """Decide whether clipboard content is interesting enough to auto-paste.
+        We only want SQL or Java SQL-builder code — anything else (URLs, short
+        words, random copy-pasted text) is ignored to avoid clobbering the
+        input box with unrelated content."""
+        if not text:
+            return False
+        s = text.strip()
+        if len(s) < 20:
+            return False     # too short to be meaningful SQL/Java
+        # Skip if it's just a single line of plain text (no SQL keywords, no
+        # Java builder hints).
+        if not (self._SQL_KW_RE.search(s) or self._JAVA_SQL_HINT_RE.search(s)):
+            return False
+        return True
+
+    def _on_auto_paste_toggle(self):
+        on = bool(self._auto_paste.get())
+        self._toast.show("Auto-paste " + ("on" if on else "off"), 900, "info")
+        self._persist_pref("auto_paste", on)
+        if on:
+            self._maybe_auto_paste()
+            self._start_auto_paste_poll()
+        else:
+            self._stop_auto_paste_poll()
+
+    def _start_auto_paste_poll(self):
+        """Re-check the clipboard every ~700 ms while auto-paste is on, so we
+        catch app-switch round-trips where Tk doesn't emit FocusIn (e.g. macOS
+        when the same child widget keeps focus throughout)."""
+        if self._auto_paste_poll_id is not None:
+            return
+        def tick():
+            self._auto_paste_poll_id = None
+            if bool(self._auto_paste.get()):
+                self._maybe_auto_paste()
+                self._auto_paste_poll_id = self.after(700, tick)
+        self._auto_paste_poll_id = self.after(700, tick)
+
+    def _stop_auto_paste_poll(self):
+        if self._auto_paste_poll_id is not None:
+            try: self.after_cancel(self._auto_paste_poll_id)
+            except Exception: pass
+            self._auto_paste_poll_id = None
+
+    def _on_window_focus_in(self, _event):
+        # Tk fires FocusIn on whichever child widget actually receives focus,
+        # not on the top-level itself, so we don't filter by widget. Repeated
+        # firings within the same app-switch are de-duped by _last_clip_seen.
+        if not bool(self._auto_paste.get()):
+            return
+        # Defer slightly so the OS finishes settling clipboard ownership.
+        self.after(120, self._maybe_auto_paste)
+
+    def _maybe_auto_paste(self):
+        if not bool(self._auto_paste.get()):
+            return
+        try:
+            clip = self.clipboard_get()
+        except Exception:
+            return
+        if not clip or clip == self._last_clip_seen:
+            return
+        self._last_clip_seen = clip
+        if not self._looks_pasteable(clip):
+            return
+        # Don't overwrite content the user is actively editing — only paste
+        # into an empty input or one still showing the placeholder.
+        existing = self._current_input().strip()
+        if existing:
+            return
+        self._clear_placeholder()
+        self.input_box.delete("1.0", tk.END)
+        self.input_box.insert("1.0", clip)
+        self._add_history(clip)
+        self._schedule_autotranslate(80)
+        self._toast.show("Auto-pasted from clipboard", 1100, "success")
 
     def _apply_line_numbers(self):
         show = bool(self._show_line_numbers.get())
@@ -1296,6 +1499,35 @@ class TranslatorApp(_BaseTk):
     def _on_input_change(self, event=None):
         self._schedule_autotranslate(350)
         self._schedule_input_highlight()
+        self._schedule_doc_save()
+
+    def _schedule_doc_save(self, delay_ms=2500):
+        """Persist the active doc-tab's input shortly after the user stops
+        typing. Guarantees the input survives even when the app exits via
+        Cmd+Q / kill / crash without firing on_close."""
+        if self._docs_save_job:
+            try: self.after_cancel(self._docs_save_job)
+            except Exception: pass
+        self._docs_save_job = self.after(delay_ms, self._persist_doc_tabs)
+
+    def _persist_doc_tabs(self):
+        self._docs_save_job = None
+        try:
+            self._capture_active_doc()
+            self._settings["doc_tabs"] = [
+                {
+                    "title":        d.get("title", ""),
+                    "input":        d.get("input", ""),
+                    "mode":         d.get("mode", "inline"),
+                    "direction":    d.get("direction", "forward"),
+                    "manual_title": bool(d.get("manual_title", False)),
+                }
+                for d in self._doctabs
+            ]
+            self._settings["active_doc"] = self._active_doc
+            save_settings(self._settings)
+        except Exception:
+            pass
 
     def _schedule_input_highlight(self, delay_ms=300):
         if self._input_hi_job:
@@ -1491,25 +1723,74 @@ class TranslatorApp(_BaseTk):
         # Direction-specific lookup is tried first; falls back to the other
         # side so Design-Doc spans (which may carry either physical or logical
         # names) always produce useful context.
+        # Group helpers — collapse a long entry list into a single summary
+        # line per distinct translation. Avoids 50-row tooltips when the
+        # column appears in many tables but always maps to the same name.
+        def _group_table_entries(entries):
+            """Group [(schema, name)] by name → {name: [schemas]}."""
+            groups = {}
+            for sc, name in entries:
+                groups.setdefault(name, []).append(sc)
+            return groups
+
+        def _group_col_entries(entries):
+            """Group [(schema, phys_table, logical_table, target)] by target.
+            Returns {target: [(schema, phys_table, logical_table)]}."""
+            groups = {}
+            for sc, pt, lt, target in entries:
+                groups.setdefault(target, []).append((sc, pt, lt))
+            return groups
+
+        def _format_table_groups(groups):
+            lines = []
+            for name, schemas in sorted(groups.items(), key=lambda g: -len(g[1])):
+                uniq = sorted(set(schemas))
+                if len(schemas) == 1:
+                    lines.append(f"  → {name}  [{schemas[0]}]")
+                else:
+                    schema_str = ", ".join(uniq[:3]) + (f" +{len(uniq)-3}" if len(uniq) > 3 else "")
+                    lines.append(f"  → {name}  ({len(schemas)} schemas: {schema_str})")
+            return lines
+
+        def _format_col_groups(groups, max_tables_inline=3):
+            lines = []
+            for target, rows in sorted(groups.items(), key=lambda g: -len(g[1])):
+                if len(rows) == 1:
+                    sc, pt, lt = rows[0]
+                    lines.append(f"  → {target}  [{lt} ({pt}) / {sc}]")
+                    continue
+                # Many tables share this same translation — show a compact
+                # "X tables in <schemas>: a, b, c, ..." summary.
+                schemas = sorted({sc for sc, _pt, _lt in rows})
+                schema_part = ", ".join(schemas[:2]) + (f" +{len(schemas)-2}" if len(schemas) > 2 else "")
+                sample = ", ".join(
+                    f"{lt}({pt})" if lt and lt != pt else pt
+                    for _sc, pt, lt in rows[:max_tables_inline]
+                )
+                more = f"  +{len(rows)-max_tables_inline} more" if len(rows) > max_tables_inline else ""
+                lines.append(
+                    f"  → {target}  ({len(rows)} tables in {schema_part})\n"
+                    f"      {sample}{more}"
+                )
+            return lines
+
         def _from_fwd_table(original):
-            entries = self.table_index[original]
             return (f"Table: {original}",
-                    [f"  → {lg}  [{sc}]" for sc, lg in entries])
+                    _format_table_groups(_group_table_entries(self.table_index[original])))
 
         def _from_fwd_col(original):
             entries = _filter_by_table_context(self.column_index[original], ctx)
             return (f"Column: {original}",
-                    [f"  → {lc}  [{lt} ({pt}) / {sc}]" for sc, pt, lt, lc in entries])
+                    _format_col_groups(_group_col_entries(entries)))
 
         def _from_rev_table(original):
-            entries = self.rev_table_index[original]
             return (f"Table: {original}",
-                    [f"  → {ph}  [{sc}]" for sc, ph in entries])
+                    _format_table_groups(_group_table_entries(self.rev_table_index[original])))
 
         def _from_rev_col(original):
             entries = _filter_by_table_context(self.rev_column_index[original], ctx)
             return (f"Column: {original}",
-                    [f"  → {pc}  [{lt} ({pt}) / {sc}]" for sc, pt, lt, pc in entries])
+                    _format_col_groups(_group_col_entries(entries)))
 
         header, body = None, None
         preferred = (
@@ -1853,6 +2134,8 @@ class TranslatorApp(_BaseTk):
                 "design_show_footer":      bool(self._show_footer.get()),
                 "pane_orient":             self._pane_orient,
                 "show_line_numbers":       bool(self._show_line_numbers.get()),
+                "word_wrap":               bool(self._word_wrap.get()),
+                "auto_paste":              bool(self._auto_paste.get()),
                 "font_size":     self._font_size,
                 "geometry":      self.winfo_geometry(),
             })

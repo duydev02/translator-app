@@ -5,6 +5,23 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **⚙ Settings menu** — Theme, Layout, Filter, Exclusions, User Map, Open file,
+  Reload JSON, Line numbers, Word wrap, and Auto-paste from clipboard are now
+  consolidated under a single menubutton in the top bar. The action bar keeps
+  only the Translate button (Clear is on `Ctrl+⌫`).
+- **Auto-paste from clipboard** — when enabled in Settings, the app watches
+  the clipboard and auto-pastes content that looks like SQL or a Java
+  SQL-builder method (`StringBuffer`, `.append(`, etc.) into an empty input.
+  Heuristic-gated so unrelated copies aren't pasted; uses a low-frequency
+  poll to work around macOS focus quirks where `<FocusIn>` doesn't fire.
+- **Word wrap toggle** with a real horizontal scrollbar when wrap is off.
+  Saved across sessions.
+- **Hover tooltips** on mode tabs, direction tabs, Settings, Help, Translate,
+  Copy, Save, History, and "+ New" tab.
+- **Auto-save of doc-tab input** — every change schedules a debounced save
+  (~2.5 s after the last keystroke) so the active tab's content survives
+  even if the app exits via Cmd+Q, force-quit, or crash without firing
+  `WM_DELETE_WINDOW`. Cmd+Q / Ctrl+Q are also bound to the close handler.
 - **Multi-input doc tabs** — edit several documents side-by-side. `Ctrl+T` new,
   `Ctrl+W` close, `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle. Double-click a tab title
   to rename it inline; right-click for Rename / Duplicate / Close / Close Others.
@@ -13,6 +30,26 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   pure logic (25 tests). Run with `pytest tests/`.
 
 ### Changed
+- **Translate button** shows its shortcut inline (`▶ Translate · Ctrl+Enter`).
+  The bottom status bar reports output stats (`42 lines · 1.2k chars`) instead
+  of duplicating the translation count.
+- **Inline Replace mode** matches lowercase / mixed-case identifiers
+  (`tab_col → 名前`) by falling back to uppercase index lookups when the
+  exact-case key isn't present.
+- **Design Doc mode** uses the Inline mode status format
+  (`Tables: N · Columns: N · Ambiguous: N`) instead of the old "(N spans)".
+  The internal `SELECT_UNION` type is shown as plain `SELECT` to users.
+- **UPPERCASE columns** option in Design Doc mode now also uppercases column
+  references on the right side of comparisons, table aliases, and SQL keyword
+  operators (`IS NULL`, `BETWEEN`, `LIKE`, `IN`, `AS`, `AND`, `OR`).
+- **Hover tooltips on output spans** group entries by translated name. A
+  column that exists in 50 tables but always maps to the same logical name
+  now shows one summary line; ambiguous columns expand into one block per
+  distinct translation.
+- **Settings persistence**: Line numbers, Word wrap, and Auto-paste are
+  written immediately on toggle (not just on close), so choices survive a
+  force-quit.
+- **Help dialog** refreshed for the new menu structure and recent shortcuts.
 - **Package refactor** — the single-file `translator.py` (~4100 lines) was
   split into a `translator_app/` package with `paths`, `themes`, `config`,
   `schema`, `translate`, `designdoc`, and `ui/` (widgets, dialogs, app).
@@ -21,6 +58,46 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   hidden-imports so the bundled exe is never missing a submodule.
 
 ### Fixed
+- **Design Doc — `UPDATE <table> <alias> SET …`**: previously the table-alias
+  shape failed to parse and emitted an empty 更新テーブル / 更新項目. The
+  parser now allows an optional alias and surfaces it as `（別名：…）`.
+- **Design Doc — `INSERT INTO t (SELECT …)`**: paren-aware parsing so the
+  wrapped SELECT shape no longer collapses into garbage column lists when
+  the inner SELECT contains nested parens (`NVL(col, 0)` etc.).
+- **Design Doc — outer-paren wrapping**: an entire SQL wrapped in `( … )`
+  (typical when used as a sub-select later) is now classified correctly
+  instead of falling through to "Unknown SQL statement type".
+- **Design Doc — `EXISTS (subquery)`**: subqueries are expanded into a
+  nested SELECT block instead of being crammed onto a single line.
+- **Design Doc — parenthesised condition groups**: `( a OR b )` expands to
+  multiple lines (recursively) instead of staying as one raw blob.
+- **Design Doc — IN-list rendering**: `IN (var)` no longer leaks Java
+  concatenation operators (`( + ... + )`); structural punctuation is now
+  treated as part of the SQL.
+- **Design Doc — multi-StringBuffer Java**: helper buffers spliced via
+  `mainSb.append(other.toString())` are inlined into the main buffer's
+  output. The main buffer is detected from `return X.toString()`, the
+  splice-consumer count, or any non-`.append(...)` `.toString()` call site.
+- **Design Doc — comma-separated FROM**: `FROM t1 a, t2 b` is parsed into
+  separate table refs (no more `b,` leaking into the alias) and listed
+  under `■抽出テーブル`.
+- **Design Doc — duplicate `■処理区分`**: the SELECT-block emitter no
+  longer re-prints its own header when the top-level emitter already did.
+- **Design Doc — string literals stay verbatim** when **UPPERCASE columns**
+  is on; identifiers inside `'Active'` are no longer uppercased to
+  `'ACTIVE'` (which would silently change SQL semantics).
+- **Sections popup positioning** — flips above the button when the action
+  bar is near the bottom of the screen and clamps to the right edge so
+  the popup never spills off-screen.
+- **Sections popup Esc / Done**: the borderless popup now grabs focus so
+  Escape actually closes it, and a visible "✓ Done" button + "Esc to close"
+  hint were added.
+- **Sections popup flash** — the popup is `withdraw`-ed until positioned and
+  then `deiconify`-ed, killing the brief center-of-screen flash on open.
+- **Input placeholder is no longer editable** — `Ctrl+⌫` doesn't re-insert
+  the placeholder while the input still has focus, and a key/click guard
+  wipes the placeholder before any first interaction so the cursor never
+  ends up *inside* placeholder text.
 - **Design Doc mode: lowercase identifiers** — `update tr_foo set bar = ?` now
   translates correctly. Lookup keys are uppercased before hitting the schema
   index, so case in the source no longer affects translation.
@@ -28,6 +105,11 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   top-level non-dict entries in the schema JSON, so files using a
   `"__comment__": "..."` header (like the shipped sample) no longer break
   startup.
+
+### Removed
+- **Tracked `translator_settings.json`** — the file is per-user runtime state
+  and was already in `.gitignore`; it had been committed earlier and is now
+  untracked.
 
 ## [1.0.0] — 2026-04-24
 
