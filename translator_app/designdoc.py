@@ -931,6 +931,129 @@ def _emit_condition_line(cond, expr_map, translate_fn, uppercase, first_prefix="
 _LONG_THRESHOLD = 10  # > 10 items → move projection section to the end
 
 
+def _count_select_in_unions(sel):
+    """Walk a SELECT/SELECT_UNION tree, returning (n_branches, list_of_select_dicts)."""
+    if not sel:
+        return 0, []
+    if sel.get("type") == "SELECT_UNION":
+        out = []
+        for p in sel.get("parts", []):
+            _, branch = _count_select_in_unions(p)
+            out.extend(branch)
+        return len(out), out
+    return 1, [sel]
+
+
+def _count_placeholders(parsed, expr_map):
+    """Count `?` markers in a parsed statement and how many Java expression
+    placeholders the source method substituted in."""
+    qmark = 0
+    expr_count = len(expr_map) if expr_map else 0
+
+    def walk_value(v):
+        nonlocal qmark
+        if isinstance(v, str):
+            qmark += sum(1 for ch in v if ch == "?")
+
+    if parsed.get("type") == "INSERT":
+        for v in parsed.get("values") or []:
+            walk_value(v)
+        for f in parsed.get("fields") or []:
+            walk_value(f)
+        if parsed.get("select"):
+            for f in parsed["select"].get("fields", []) or []:
+                walk_value(f)
+    elif parsed.get("type") == "UPDATE":
+        for a in parsed.get("set") or []:
+            walk_value(a.get("value", ""))
+    return qmark, expr_count
+
+
+def _build_stats_block(parsed, expr_map):
+    """Return an indented list of one-liner stats describing the parsed
+    statement. Empty list ⇒ no stats block is shown."""
+    if not parsed or parsed.get("type") in (None, "UNKNOWN"):
+        return []
+    stype = parsed["type"]
+    rows = []
+    qmark, expr_count = _count_placeholders(parsed, expr_map)
+
+    if stype == "INSERT":
+        sel = parsed.get("select")
+        # Prefer the explicit (col_list) count when present — that's the
+        # author-stated number of columns being inserted. Fall back to the
+        # SELECT projection count or VALUES count.
+        n_cols = len(parsed.get("columns") or [])
+        n_vals = len(parsed.get("values") or []) or (
+            len(sel.get("fields", []) or []) if sel else 0
+        )
+        if not n_cols:
+            n_cols = n_vals
+        rows.append(f"Target table: {parsed.get('target', '') or '(unknown)'}")
+        if n_cols:
+            rows.append(f"Columns: {n_cols}")
+        if n_vals and n_vals != n_cols:
+            rows.append(f"Values: {n_vals}")
+        if sel:
+            rows.append("Source: SELECT subquery")
+        elif parsed.get("values"):
+            rows.append("Source: VALUES")
+
+    elif stype == "UPDATE":
+        rows.append(
+            f"Target table: {parsed.get('target','') or '(unknown)'}"
+            + (f"  (alias {parsed['alias']})" if parsed.get("alias") else "")
+        )
+        rows.append(f"SET columns: {len(parsed.get('set') or [])}")
+        rows.append(f"WHERE conditions: {len(parsed.get('where') or [])}")
+
+    elif stype == "DELETE":
+        rows.append(f"Target table: {parsed.get('target','') or '(unknown)'}")
+        rows.append(f"WHERE conditions: {len(parsed.get('where') or [])}")
+
+    elif stype in ("SELECT", "SELECT_UNION"):
+        n_branch, branches = _count_select_in_unions(parsed)
+        if n_branch > 1:
+            rows.append(f"UNION branches: {n_branch}")
+        total_fields = 0
+        total_tables = 0
+        total_joins  = 0
+        total_where  = 0
+        total_group  = 0
+        total_having = 0
+        total_order  = 0
+        for b in branches:
+            total_fields += len(b.get("fields") or [])
+            from_info = b.get("from") or {}
+            if from_info.get("main"):
+                total_tables += 1
+            total_tables += len(from_info.get("cross") or [])
+            total_joins  += len(from_info.get("joins") or [])
+            total_where  += len(b.get("where") or [])
+            total_group  += len(b.get("group_by") or [])
+            total_having += len(b.get("having") or [])
+            total_order  += len(b.get("order_by") or [])
+        rows.append(f"Selected columns: {total_fields}"
+                    + (" (DISTINCT)" if any(b.get("distinct") for b in branches) else ""))
+        rows.append(f"Tables: {total_tables}"
+                    + (f"  ·  JOINs: {total_joins}" if total_joins else ""))
+        rows.append(f"WHERE: {total_where}"
+                    + (f"  ·  HAVING: {total_having}" if total_having else "")
+                    + (f"  ·  GROUP BY: {total_group}" if total_group else "")
+                    + (f"  ·  ORDER BY: {total_order}" if total_order else ""))
+
+    elif stype == "TRUNCATE":
+        rows.append(f"Target table: {parsed.get('target','') or '(unknown)'}")
+
+    if qmark or expr_count:
+        bits = []
+        if qmark:      bits.append(f"? binds: {qmark}")
+        if expr_count: bits.append(f"Java embeds: {expr_count}")
+        rows.append("  ·  ".join(bits))
+
+    return [_TAB + r for r in rows]
+
+
 _EXISTS_RE = re.compile(r'^\s*((?:NOT\s+)?EXISTS)\s*\((.*)\)\s*$', re.IGNORECASE | re.DOTALL)
 
 
@@ -1020,7 +1143,8 @@ def _emit_update(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
     def _emit_set():
         if not flags.get("show_projection", True):
             return
-        lines.append("■更新項目")
+        n = len(parsed.get("set", []))
+        lines.append(f"■更新項目 ({n})")
         lines.append(_TAB + "カラム名" + _COL_TABS + "セット内容")
         for a in parsed.get("set", []):
             col = _render_name(a["col"], translate_fn, uppercase)
@@ -1031,7 +1155,7 @@ def _emit_update(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
     def _emit_where():
         if not flags.get("show_where", True) or not parsed.get("where"):
             return
-        lines.append("■抽出条件")
+        lines.append(f"■抽出条件 ({len(parsed['where'])})")
         for c in parsed["where"]:
             lines.extend(_emit_condition_lines(c, expr_map, translate_fn, uppercase, indent=1, flags=flags))
         lines.append("")
@@ -1057,7 +1181,7 @@ def _emit_delete(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
         lines.append("")
 
     if flags.get("show_where", True) and parsed.get("where"):
-        lines.append("■抽出条件")
+        lines.append(f"■抽出条件 ({len(parsed['where'])})")
         for c in parsed["where"]:
             lines.extend(_emit_condition_lines(c, expr_map, translate_fn, uppercase, indent=1, flags=flags))
         lines.append("")
@@ -1102,7 +1226,8 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
     def _emit_projection():
         if not flags.get("show_projection", True):
             return
-        out.append(ind + "■抽出項目" + distinct_str)
+        n = len(parsed.get("fields", []))
+        out.append(ind + f"■抽出項目 ({n})" + distinct_str)
         for f in parsed.get("fields", []):
             out.append(ind + _TAB + _render_value(f, expr_map, translate_fn, uppercase=uppercase))
         out.append("")
@@ -1112,14 +1237,16 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
         if not (from_info and from_info.get("main")):
             return
         if flags.get("show_from", True):
-            out.append(ind + "■抽出テーブル")
+            n_tables = 1 + len(from_info.get("cross") or [])
+            header = "■抽出テーブル" + (f" ({n_tables})" if n_tables > 1 else "")
+            out.append(ind + header)
             _emit_table_ref_item(from_info["main"])
             # Old-style comma-separated FROM tables (cross-join syntax).
             for ref in from_info.get("cross", []) or []:
                 _emit_table_ref_item(ref)
             out.append("")
         if flags.get("show_join", True) and from_info.get("joins"):
-            out.append(ind + "■結合条件")
+            out.append(ind + f"■結合条件 ({len(from_info['joins'])})")
             for join in from_info["joins"]:
                 ja = dict(JOIN_PATTERNS).get(join["kind"], join["kind"])
                 out.append(ind + _TAB + ja)
@@ -1132,7 +1259,7 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
 
     def _emit_where():
         if flags.get("show_where", True) and parsed.get("where"):
-            out.append(ind + "■抽出条件")
+            out.append(ind + f"■抽出条件 ({len(parsed['where'])})")
             for c in parsed["where"]:
                 out.extend(_emit_condition_lines(
                     c, expr_map, translate_fn, uppercase,
@@ -1141,14 +1268,14 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
 
     def _emit_group():
         if flags.get("show_group", True) and parsed.get("group_by"):
-            out.append(ind + "■グループ化条件")
+            out.append(ind + f"■グループ化条件 ({len(parsed['group_by'])})")
             for g in parsed["group_by"]:
                 out.append(ind + _TAB + _render_value(g, expr_map, translate_fn, uppercase=uppercase))
             out.append("")
 
     def _emit_having():
         if flags.get("show_having", True) and parsed.get("having"):
-            out.append(ind + "■集計後抽出条件")
+            out.append(ind + f"■集計後抽出条件 ({len(parsed['having'])})")
             for c in parsed["having"]:
                 out.extend(_emit_condition_lines(
                     c, expr_map, translate_fn, uppercase,
@@ -1157,7 +1284,7 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
 
     def _emit_order():
         if flags.get("show_order", True) and parsed.get("order_by"):
-            out.append(ind + "■並び順")
+            out.append(ind + f"■並び順 ({len(parsed['order_by'])})")
             for o in parsed["order_by"]:
                 out.append(ind + _TAB + _render_value(o, expr_map, translate_fn, uppercase=uppercase))
             out.append("")
@@ -1232,7 +1359,12 @@ def _emit_insert(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
     def _emit_mapping():
         if not flags.get("show_projection", True):
             return
-        lines.append("■項目移送")
+        # The header count should reflect what the user is actually inserting.
+        # Prefer the explicit (col_list) count from `columns`; fall back to the
+        # rendered rows (fields or values) only if no col_list was given.
+        n_rows = len(fields) if fields else len(values or [])
+        n = len(columns) or n_rows
+        lines.append(f"■項目移送 ({n})")
         lines.append(_TAB + "カラム名" + _COL_TABS + "セット内容")
         if fields:
             for i, f in enumerate(fields):
@@ -1330,6 +1462,431 @@ def _build_table_context(parsed, table_index):
     return ctx
 
 
+# SQL clause keywords that should start a new line. Order matters — longer
+# multi-word forms must be tried before their shorter prefixes (so
+# `INSERT INTO` is matched as a unit before `INSERT`).
+_PRETTY_NEWLINE_KWS = sorted([
+    "SELECT", "INSERT INTO", "INSERT", "UPDATE", "DELETE FROM", "DELETE",
+    "TRUNCATE TABLE", "TRUNCATE",
+    "SET", "VALUES", "FROM", "WHERE",
+    "GROUP BY", "HAVING", "ORDER BY",
+    "UNION ALL", "UNION",
+    "INNER JOIN", "LEFT OUTER JOIN", "LEFT JOIN",
+    "RIGHT OUTER JOIN", "RIGHT JOIN",
+    "FULL OUTER JOIN", "FULL JOIN", "CROSS JOIN", "JOIN",
+    "ON",
+], key=len, reverse=True)
+# Connectors that get a new line under the parent clause (extra indent).
+_PRETTY_CONJ_KWS = ["AND", "OR"]
+# Right-align width (the longest common keyword we care about — e.g. "UPDATE",
+# "VALUES", "WHERE"). Wider keywords like "GROUP BY" / "UNION ALL" simply
+# overflow but stay readable.
+_PRETTY_WIDTH = 6
+
+
+def _pretty_sql(sql: str) -> str:
+    """Reformat a one-line SQL into a multi-line, right-aligned block.
+
+    Aware of single-quoted strings, ${placeholder} markers, and parens, so we
+    only break on KEYWORDS at the top nesting level. Subqueries on a clause's
+    right-hand side are left intact (we don't recurse) — that keeps the
+    output predictable for messy generated SQL.
+    """
+    if not sql:
+        return sql
+    s = re.sub(r"\s+", " ", sql).strip()
+    n = len(s)
+
+    # Walk the string, finding break points (keyword spans at depth 0,
+    # outside strings and ${...} placeholders).
+    breaks = []   # list of (start, end, kw_upper)
+    i = 0
+    depth = 0
+    in_str = False
+    in_ph  = False
+
+    def _kw_match_at(pos):
+        # Must be at a word boundary (start of buffer or non-word char before).
+        if pos and (s[pos - 1].isalnum() or s[pos - 1] == "_"):
+            return None
+        upper_s = s[pos:].upper()
+        for kw in _PRETTY_NEWLINE_KWS + _PRETTY_CONJ_KWS:
+            if upper_s.startswith(kw):
+                end = pos + len(kw)
+                if end < n and (s[end].isalnum() or s[end] == "_"):
+                    continue   # not a real keyword boundary
+                # multi-word keywords use exactly one space between tokens —
+                # we already collapsed whitespace, so this just works.
+                return (pos, end, kw)
+        return None
+
+    while i < n:
+        c = s[i]
+        if in_str:
+            if c == "\\" and i + 1 < n:
+                i += 2; continue
+            if c == "'":
+                in_str = False
+            i += 1; continue
+        if in_ph:
+            if c == "}":
+                in_ph = False
+            i += 1; continue
+        if c == "'":
+            in_str = True; i += 1; continue
+        if c == "$" and i + 1 < n and s[i + 1] == "{":
+            in_ph = True; i += 2; continue
+        if c == "(":
+            depth += 1; i += 1; continue
+        if c == ")":
+            depth -= 1; i += 1; continue
+        if depth == 0:
+            m = _kw_match_at(i)
+            if m is not None:
+                breaks.append(m)
+                i = m[1]
+                continue
+        i += 1
+
+    if not breaks:
+        return s
+
+    # Build (kw, body) pairs.
+    pairs = []
+    cursor = 0
+    if breaks[0][0] > 0:
+        head = s[:breaks[0][0]].strip()
+        if head:
+            pairs.append((None, head))
+    for idx, (start, end, kw) in enumerate(breaks):
+        next_start = breaks[idx + 1][0] if idx + 1 < len(breaks) else n
+        body = s[end:next_start].strip()
+        pairs.append((kw, body))
+        cursor = next_start
+
+    # Render: clause keywords right-aligned to _PRETTY_WIDTH, AND/OR indented
+    # one level further so they sit visually under WHERE/ON content.
+    lines = []
+    for kw, body in pairs:
+        if kw is None:
+            lines.append(body)
+            continue
+        # All keywords share the same right-aligned column so they line up
+        # vertically (UPDATE, SET, WHERE, AND, OR, …). Wider keywords like
+        # GROUP BY simply overflow but stay readable.
+        prefix = kw.rjust(_PRETTY_WIDTH)
+        lines.append(prefix + (" " + body if body else ""))
+    return "\n".join(lines)
+
+
+def _collect_columns_referenced(parsed):
+    """Walk a parsed statement and return a list of (phys_col, context) where
+    context is a short human-readable string explaining where the column was
+    seen (e.g. "INSERT col 1", "UPDATE SET", "WHERE", "SELECT").
+    For sub-selects nested via JOIN/EXISTS we recurse but tag with prefix."""
+    out = []
+
+    def add_col(name, ctx):
+        if not name:
+            return
+        # Strip alias prefix and bracketed function calls
+        n = name.strip()
+        # `tbl.col` → take the trailing identifier
+        if "." in n and n.split(".")[-1].replace("_", "").isalnum():
+            n = n.split(".")[-1]
+        # Skip things that don't look like a bare identifier
+        if not re.match(r"^[A-Za-z_][A-Za-z_0-9]*$", n):
+            return
+        out.append((n, ctx))
+
+    def walk_conds(conds, ctx):
+        for c in conds or []:
+            add_col(c.get("left", ""), ctx)
+            # right may also reference a column (alias.col on the RHS)
+            r = (c.get("right") or "").strip()
+            if r and re.match(r"^[A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)?$", r):
+                add_col(r, ctx)
+
+    def walk_select(p, prefix=""):
+        if not p:
+            return
+        if p.get("type") == "SELECT_UNION":
+            for i, b in enumerate(p.get("parts", [])):
+                walk_select(b, f"{prefix}UNION#{i+1} ")
+            return
+        for f in p.get("fields", []) or []:
+            add_col(f, f"{prefix}SELECT")
+        from_info = p.get("from") or {}
+        for j in from_info.get("joins", []) or []:
+            walk_conds(j.get("on"), f"{prefix}JOIN ON")
+            ref = j.get("table_ref") or {}
+            if ref.get("subquery"):
+                walk_select(ref["subquery"], f"{prefix}JOIN-sub ")
+        walk_conds(p.get("where"), f"{prefix}WHERE")
+        walk_conds(p.get("having"), f"{prefix}HAVING")
+        for g in p.get("group_by") or []:
+            add_col(g, f"{prefix}GROUP BY")
+        for o in p.get("order_by") or []:
+            add_col(o, f"{prefix}ORDER BY")
+
+    t = parsed.get("type")
+    if t == "INSERT":
+        for i, c in enumerate(parsed.get("columns") or []):
+            add_col(c, f"INSERT col {i+1}")
+        if parsed.get("select"):
+            walk_select(parsed["select"])
+    elif t == "UPDATE":
+        for a in parsed.get("set") or []:
+            add_col(a.get("col", ""), "UPDATE SET")
+        walk_conds(parsed.get("where"), "UPDATE WHERE")
+    elif t == "DELETE":
+        walk_conds(parsed.get("where"), "DELETE WHERE")
+    elif t in ("SELECT", "SELECT_UNION"):
+        walk_select(parsed)
+
+    # De-duplicate while preserving order
+    seen = {}
+    for name, ctx in out:
+        seen.setdefault(name, []).append(ctx)
+    return [(n, sorted(set(ctxs))) for n, ctxs in seen.items()]
+
+
+def compute_design_details(
+    java_code: str,
+    table_index: dict,
+    column_index: dict,
+    rev_table_index: dict | None = None,
+    rev_column_index: dict | None = None,
+    schemas=None,
+    tables=None,
+):
+    """Build a deep-dive view of the parsed Java SQL. Returns a dict with
+    everything an Inspect window needs to render. Best-effort — failures
+    yield an empty/partial dict rather than raising."""
+    out = {
+        "ok": False,
+        "stype": "",
+        "stats": [],
+        "warnings": [],
+        "buffers": [],
+        "java_placeholders": [],
+        "bind_positions": [],
+        "column_lineage": [],
+        "ambiguous": [],
+        "unknown_tokens": [],
+        "reconstructed_sql": "",
+    }
+    try:
+        sql, expr_map, _javadoc, _func = _build_sql_from_java(java_code)
+    except Exception as e:
+        out["warnings"].append(f"Java parse error: {e}")
+        return out
+    if not sql.strip():
+        out["warnings"].append("No SQL found — did the method use sb.append(...)?")
+        return out
+
+    parsed = _parse_sql(sql)
+    out["ok"] = True
+    out["stype"] = parsed.get("type", "")
+    out["stats"] = [s.lstrip("\t ") for s in _build_stats_block(parsed, expr_map)]
+
+    # ── Reconstructed SQL — substitute <EXPR_OPEN>N<EXPR_CLOSE> with ${expr}
+    def _reconstruct(text):
+        if not text:
+            return ""
+        def repl(m):
+            idx = int(m.group(1))
+            expr = (expr_map.get(idx, "") or "").strip()
+            # Keep it readable; truncate very long expressions.
+            if len(expr) > 60:
+                expr = expr[:57] + "…"
+            return "${" + expr + "}"
+        return re.sub(
+            re.escape(_EXPR_OPEN) + r"(\d+)" + re.escape(_EXPR_CLOSE),
+            repl,
+            text,
+        )
+    out["reconstructed_sql"] = _pretty_sql(_reconstruct(sql))
+
+    # ── Buffers
+    appends = _extract_appends_with_receiver(_strip_java_comments(java_code))
+    by_buffer = {}
+    order = []
+    for recv, _arg in appends:
+        if not recv:
+            continue
+        if recv not in by_buffer:
+            by_buffer[recv] = 0
+            order.append(recv)
+        by_buffer[recv] += 1
+    if by_buffer:
+        # Reuse the same heuristic as _build_sql_from_java to label "main"
+        rm = re.search(
+            r'return\s+([A-Za-z_][A-Za-z_0-9]*)\s*\.\s*toString\s*\(',
+            _strip_java_comments(java_code),
+        )
+        main = rm.group(1) if rm and rm.group(1) in by_buffer else None
+        if main is None:
+            consume = {b: 0 for b in by_buffer}
+            for buf, ents in by_buffer.items():
+                pass  # consume calc requires full args; skip — just heuristic
+            # fall back: most appends
+            main = max(order, key=lambda b: by_buffer[b])
+        for b in order:
+            out["buffers"].append({
+                "name": b,
+                "appends": by_buffer[b],
+                "is_main": (b == main),
+            })
+
+    # ── Java placeholders — id, expr, rendered, occurrences
+    if expr_map:
+        sql_with_markers = sql
+        for idx in sorted(expr_map):
+            marker = f"{_EXPR_OPEN}{idx}{_EXPR_CLOSE}"
+            count = sql_with_markers.count(marker)
+            expr = (expr_map[idx] or "").strip()
+            rendered = _render_expr(expr)
+            out["java_placeholders"].append({
+                "id": idx,
+                "expr": expr,
+                "rendered": rendered,
+                "occurrences": count,
+            })
+
+    # ── ? bind positions
+    bind_no = 0
+    def add_bind(context, value):
+        nonlocal bind_no
+        for ch in value or "":
+            if ch == "?":
+                bind_no += 1
+                out["bind_positions"].append({"index": bind_no, "context": context})
+
+    if parsed.get("type") == "INSERT":
+        cols = parsed.get("columns") or []
+        vals = parsed.get("values") or []
+        if vals:
+            for i, v in enumerate(vals):
+                col = cols[i] if i < len(cols) else f"col {i+1}"
+                add_bind(f"INSERT → {col}", v)
+        elif parsed.get("select"):
+            for f in (parsed["select"].get("fields") or []):
+                add_bind("INSERT ← SELECT", f)
+    elif parsed.get("type") == "UPDATE":
+        for a in parsed.get("set") or []:
+            add_bind(f"SET {a.get('col','')}", a.get("value", ""))
+        for c in parsed.get("where") or []:
+            add_bind(f"WHERE {c.get('left','')}", c.get("right", ""))
+    elif parsed.get("type") == "DELETE":
+        for c in parsed.get("where") or []:
+            add_bind(f"WHERE {c.get('left','')}", c.get("right", ""))
+
+    # ── Column lineage / ambiguity / unknowns
+    cols_seen = _collect_columns_referenced(parsed)
+    for phys, ctxs in cols_seen:
+        key = phys.upper()
+        if key in column_index:
+            entries = _filter_entries(column_index[key], schemas=schemas, tables=tables)
+            if not entries:
+                continue
+            chosen = _most_common(key, entries)
+            grouped = {}
+            for sc, pt, lt, lc in entries:
+                grouped.setdefault(lc, []).append((sc, pt, lt))
+            ambiguous = len(grouped) > 1
+            row = {
+                "phys": phys,
+                "logical": chosen,
+                "context": ", ".join(ctxs),
+                "ambiguous": ambiguous,
+                "groups": [
+                    {"logical": lg, "tables": rows}
+                    for lg, rows in sorted(grouped.items(), key=lambda g: -len(g[1]))
+                ],
+            }
+            out["column_lineage"].append(row)
+            if ambiguous:
+                out["ambiguous"].append(row)
+        elif key in (table_index or {}):
+            # Tables get listed too — separate context
+            pass
+        else:
+            out["unknown_tokens"].append(phys)
+
+    # De-dupe unknowns
+    out["unknown_tokens"] = sorted(set(out["unknown_tokens"]))
+
+    # ── Validation warnings
+    if parsed.get("type") == "INSERT":
+        cols = parsed.get("columns") or []
+        vals = parsed.get("values") or []
+        sel = parsed.get("select") or {}
+        sel_fields = sel.get("fields") or [] if sel else []
+        if cols and vals and len(cols) != len(vals):
+            out["warnings"].append(
+                f"INSERT column count ({len(cols)}) ≠ VALUES count ({len(vals)})"
+            )
+        if cols and sel_fields and len(cols) != len(sel_fields):
+            out["warnings"].append(
+                f"INSERT column count ({len(cols)}) ≠ SELECT field count ({len(sel_fields)})"
+            )
+
+    # Alias-vs-FROM consistency: scan WHERE/JOIN for `alias.col` where alias
+    # isn't bound by any FROM/JOIN/cross/sub-select.
+    alias_map = _build_alias_map(parsed) or {}
+    bound_aliases = {a.upper() for a in alias_map}
+    referenced = set()
+    def scan_conds(conds):
+        for c in conds or []:
+            for side in (c.get("left", ""), c.get("right", "")):
+                m = re.match(r"^([A-Za-z_][A-Za-z_0-9]*)\.[A-Za-z_]", side or "")
+                if m:
+                    referenced.add(m.group(1).upper())
+    def scan_select(p):
+        if not p: return
+        if p.get("type") == "SELECT_UNION":
+            for b in p.get("parts", []): scan_select(b)
+            return
+        scan_conds(p.get("where"))
+        scan_conds(p.get("having"))
+        for j in (p.get("from") or {}).get("joins") or []:
+            scan_conds(j.get("on"))
+            if (j.get("table_ref") or {}).get("subquery"):
+                scan_select(j["table_ref"]["subquery"])
+    if parsed.get("type") == "UPDATE":
+        scan_conds(parsed.get("where"))
+        if parsed.get("alias"):
+            bound_aliases.add(parsed["alias"].upper())
+    elif parsed.get("type") == "DELETE":
+        scan_conds(parsed.get("where"))
+    elif parsed.get("type") in ("SELECT", "SELECT_UNION"):
+        scan_select(parsed)
+    dangling = referenced - bound_aliases
+    # Filter out what looks like a real table name (might be schema-qualified)
+    dangling = {a for a in dangling if a.lower() not in (table_index or {}) and a not in (table_index or {})}
+    for a in sorted(dangling):
+        out["warnings"].append(f"Reference to '{a}.x' but no FROM/JOIN/UPDATE binds alias '{a}'")
+
+    return out
+
+
+def compute_design_stats(java_code: str) -> list:
+    """Parse `java_code` enough to produce the same per-mode statistics that
+    used to live in the ■SQL概要 block. Returns a list of plain strings —
+    each one a stat line, no leading whitespace — or an empty list if the
+    SQL couldn't be parsed. Intended for UI display alongside (not inside)
+    the design doc text."""
+    try:
+        sql, expr_map, _javadoc, _func = _build_sql_from_java(java_code)
+    except Exception:
+        return []
+    if not sql.strip():
+        return []
+    parsed = _parse_sql(sql)
+    return [s.lstrip("\t ") for s in _build_stats_block(parsed, expr_map)]
+
+
 def java_to_design_doc(
     java_code: str,
     table_index: dict,
@@ -1353,6 +1910,7 @@ def java_to_design_doc(
     show_having: bool = True,
     show_order: bool = True,
     show_footer: bool = True,
+    show_stats: bool = True,
 ) -> str:
     """Top-level entry point: Java method text → design-doc string."""
     try:
@@ -1436,6 +1994,11 @@ def java_to_design_doc(
         # SELECT_UNION is an internal classification; users see plain SELECT.
         lines.append(_TAB + ("SELECT" if stype == "SELECT_UNION" else stype))
         lines.append("")
+
+    # NOTE: the per-mode statistics block (■SQL概要) used to be emitted here.
+    # It moved to a non-copyable header label in the UI so users don't end up
+    # pasting summary lines into their design docs by accident. Use
+    # compute_design_stats() to get the same data out-of-band.
 
     # Bundle section flags for the emit functions
     flags = {

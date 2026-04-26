@@ -42,6 +42,7 @@ def toggle_sections_popup(app):
     add_check("【SQL定義名】",            app._show_sql_physical)
     add_sep()
     add_check("■処理区分",               app._show_stype)
+    add_check("■SQL概要 (statistics)",   app._show_stats)
     add_check("■対象/登録/更新テーブル",   app._show_target)
     add_check("■項目移送/更新項目/抽出項目", app._show_projection)
     add_check("■抽出テーブル (FROM)",     app._show_from)

@@ -14,7 +14,7 @@ from ..config import (
     save_settings,
     save_user_map,
 )
-from ..designdoc import java_to_design_doc
+from ..designdoc import java_to_design_doc, compute_design_stats
 from ..paths import BASE_DIR, CUSTOM_SCHEMA, MAX_HISTORY, USER_MAP_FILE
 from ..schema import (
     _filter_by_table_context,
@@ -457,6 +457,7 @@ class TranslatorApp(_BaseTk):
         self._show_having       = _flag("design_show_having")
         self._show_order        = _flag("design_show_order")
         self._show_footer       = _flag("design_show_footer")
+        self._show_stats        = _flag("design_show_stats")
 
         self._sections_mb = tk.Button(
             self._actionbar, text="⚙ Sections ▾", font=self._ui_b,
@@ -483,10 +484,36 @@ class TranslatorApp(_BaseTk):
         self._lbl_out = tk.Label(out_header, text="Translation result", font=self._ui_b, anchor="w")
         self._lbl_out.pack(side="left")
 
+        # Design Doc statistics — shown only in Design Doc mode and only when
+        # the "■SQL概要" toggle is on. Lives outside the main output Text
+        # widget so the design-doc copy/paste stays clean, but uses a Text
+        # widget itself (rather than a Label) so the user can still select
+        # and copy stats values when needed.
+        self._stats_bar = tk.Frame(bot_pane)
+        # Don't pack yet — _refresh_stats_bar() handles visibility.
+        self._stats_lbl = tk.Text(
+            self._stats_bar, height=1, font=self._small,
+            wrap="word", relief="flat", borderwidth=0,
+            padx=4, pady=2, cursor="arrow",
+        )
+        # Read-only but selectable: re-enable just before any programmatic
+        # update, then disable. We bind <Key> to 'break' to block typing.
+        self._stats_lbl.bind("<Key>", lambda e: "break")
+        self._stats_lbl.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=(0, 2))
+
         self._copy_btn = tk.Button(out_header, text="⎘  Copy",
             font=self._ui_b, relief="flat", padx=10, pady=2, cursor="hand2", bd=0,
             command=self.on_copy)
         self._copy_btn.pack(side="right")
+
+        # Inspect button — opens a dialog with the deeper details (column
+        # lineage, ? bind positions, Java vars, buffers, warnings,
+        # reconstructed SQL). Only useful in Design Doc mode; we still show
+        # it always but hide via _refresh_mode_tabs to keep the header tidy.
+        self._inspect_btn = tk.Button(out_header, text="🔍  Inspect",
+            font=self._ui_b, relief="flat", padx=10, pady=2, cursor="hand2", bd=0,
+            command=self.open_inspect_dialog)
+        self._inspect_btn.pack(side="right", padx=(0, 6))
 
         self._save_btn = tk.Button(out_header, text="💾  Save…",
             font=self._ui_b, relief="flat", padx=10, pady=2, cursor="hand2", bd=0,
@@ -555,7 +582,8 @@ class TranslatorApp(_BaseTk):
         # Theme-tracked widget lists
         self._frames = [self._topbar, self._actionbar, self._statusbar, in_header,
                         out_header, top_pane, bot_pane, self._search_frame,
-                        self._tab_frame, self._doctabs_bar, self._doctabs_inner, self]
+                        self._tab_frame, self._doctabs_bar, self._doctabs_inner,
+                        self._stats_bar, self]
         self._labels = [self._lbl_in, self._lbl_out, self._hint_in, self._hint_out,
                         self._sb_index, self._sb_match, self._status_lbl, self._tab_sep,
                         self._search_count_lbl]
@@ -585,11 +613,18 @@ class TranslatorApp(_BaseTk):
         self.output_box.configure(bg=t["output_bg"], fg=t["fg"])
         self._theme_scrollbar(self.input_box.vbar, t)
         self._theme_scrollbar(self.output_box.vbar, t)
+        # Horizontal scrollbars (only visible when word-wrap is off, but we
+        # color them regardless so the next reveal looks right).
+        try:
+            self._theme_scrollbar(self._input_hscroll, t)
+            self._theme_scrollbar(self._output_hscroll, t)
+        except Exception:
+            pass
 
         self._translate_btn.configure(
             bg=t["accent"], fg=t["accent_fg"],
             activebackground=t["accent"], activeforeground=t["accent_fg"])
-        for btn in (self._copy_btn, self._save_btn,
+        for btn in (self._copy_btn, self._save_btn, self._inspect_btn,
                     self._help_btn, self._history_btn,
                     self._settings_btn,
                     self._doctabs_newbtn,
@@ -599,17 +634,42 @@ class TranslatorApp(_BaseTk):
         # Re-render doc tabs so they pick up new theme colors
         if hasattr(self, "_doctabs_inner"):
             self._render_doctabs()
-        # Settings menu colors + theme toggle label
-        try:
-            self._settings_menu.configure(
-                bg=t["surface"], fg=t["fg"],
-                activebackground=t["accent"], activeforeground=t["accent_fg"])
-        except Exception:
-            pass
+        # Settings menu + History dropdown menu colors. Tk Menus default to
+        # OS-native colors that don't track our theme, so configure them
+        # explicitly. `selectcolor` is the indicator color for checkbutton
+        # entries (Line numbers / Word wrap / Auto-paste).
+        for menu in (
+            getattr(self, "_settings_menu", None),
+            getattr(self, "_history_menu",  None),
+        ):
+            if menu is None:
+                continue
+            try:
+                menu.configure(
+                    bg=t["surface"], fg=t["fg"],
+                    activebackground=t["accent"], activeforeground=t["accent_fg"],
+                    selectcolor=t["fg"],
+                    bd=0, relief="flat",
+                )
+            except Exception:
+                pass
         self._refresh_theme_menu_item()
 
         # Search entry
         self._search_entry.configure(bg=t["surface"], fg=t["fg"], insertbackground=t["insert"])
+
+        # Stats bar (read-only Text widget). `selectforeground` and
+        # `inactiveselectbackground` make selections visible whether or not
+        # the widget currently has focus.
+        try:
+            self._stats_lbl.configure(
+                bg=t["bg"], fg=t["fg_muted"],
+                selectbackground=t["accent"], selectforeground=t["accent_fg"],
+                inactiveselectbackground=t["accent"],
+                highlightthickness=0,
+            )
+        except Exception:
+            pass
 
         # Uppercase checkbox (Design Doc mode)
         try:
@@ -1123,7 +1183,11 @@ class TranslatorApp(_BaseTk):
         # Switch to the tab first so all "current"-scoped shortcuts line up
         if i != self._active_doc:
             self._switch_doc_tab(i)
-        m = tk.Menu(self, tearoff=0)
+        t = THEMES[self._theme]
+        m = tk.Menu(self, tearoff=0,
+            bg=t["surface"], fg=t["fg"],
+            activebackground=t["accent"], activeforeground=t["accent_fg"],
+            bd=0, relief="flat")
         m.add_command(label="Rename",
             command=lambda: self._begin_rename_doc_tab(i, frame, btn))
         m.add_command(label="Duplicate", command=lambda: self._duplicate_doc_tab(i))
@@ -1217,9 +1281,12 @@ class TranslatorApp(_BaseTk):
             if mode == "designdoc":
                 self._upper_chk.pack(side="left", padx=(10, 0))
                 self._sections_mb.pack(side="left", padx=(6, 0))
+                # Inspect button is Design-Doc-only.
+                self._inspect_btn.pack(side="right", padx=(0, 6))
             else:
                 self._upper_chk.pack_forget()
                 self._sections_mb.pack_forget()
+                self._inspect_btn.pack_forget()
         except AttributeError:
             pass
 
@@ -1318,6 +1385,12 @@ class TranslatorApp(_BaseTk):
             extra_txt = f"  ·  Ambiguous: {n_amb}" if n_amb else ""
             self._status_var.set(f"Tables: {n_t}  ·  Columns: {n_c}{extra_txt}")
             self._refresh_output_stats()
+            # Refresh the (non-copyable) ■SQL概要 label above the output.
+            try:
+                stats = compute_design_stats(text)
+            except Exception:
+                stats = []
+            self._refresh_stats_bar(stats)
             return
 
         ctx = self._table_context
@@ -1360,6 +1433,8 @@ class TranslatorApp(_BaseTk):
 
         self._status_var.set(f"Tables: {n_t}  ·  Columns: {n_c}{extra_txt}")
         self._refresh_output_stats()
+        # Stats label is Design-Doc-only — hide it in Table / Inline modes.
+        self._refresh_stats_bar([])
 
     # ── Clear / copy / history ────────────────────────────────────────────────
     def on_clear(self):
@@ -1408,13 +1483,83 @@ class TranslatorApp(_BaseTk):
             self._history_menu.add_command(label="(empty)", state="disabled")
             return
         for item in reversed(self._history):
-            preview = item.replace("\n", " ⏎ ")
-            if len(preview) > 60:
-                preview = preview[:57] + "…"
+            label = self._history_label(item)
             self._history_menu.add_command(
-                label=preview, command=lambda v=item: self._load_from_history(v))
+                label=label, command=lambda v=item: self._load_from_history(v))
         self._history_menu.add_separator()
         self._history_menu.add_command(label="Clear history", command=self._clear_history)
+
+    # Regexes for extracting a distinguishing label from a history entry.
+    _HIST_JAVA_METHOD_RE = re.compile(
+        r"\b(?:public|private|protected|static|final|synchronized|\s)+"
+        r"[\w<>\[\],\s]+?\s+(\w+)\s*\(",
+    )
+    _HIST_JAVA_DOC_RE = re.compile(r"/\*\*(.+?)\*/", re.DOTALL)
+    _HIST_SQL_KW_RE = re.compile(
+        r"\b(SELECT|INSERT\s+INTO|INSERT|UPDATE|DELETE\s+FROM|DELETE|TRUNCATE)"
+        r"\s+([A-Za-z_][A-Za-z_0-9.]*)",
+        re.IGNORECASE,
+    )
+    _HIST_MAX_LEN = 80
+
+    def _history_label(self, text):
+        """Return a single-line label for a history menu entry that's
+        distinctive even when many entries share the same `/**` boilerplate.
+
+        Order of preference:
+          1. Java method name (`getMethodName()`) plus a short javadoc summary.
+          2. First SQL keyword + target (`SELECT R_SYOHIN`, `UPDATE TR_FOO`).
+          3. First non-comment, non-blank line.
+          4. Whole text with newlines collapsed (legacy behaviour).
+        """
+        if not text:
+            return "(empty)"
+        # 1. Java method
+        m = self._HIST_JAVA_METHOD_RE.search(text)
+        if m:
+            method = m.group(1)
+            desc = ""
+            dm = self._HIST_JAVA_DOC_RE.search(text[: m.start()])
+            if dm:
+                # Strip leading "*" from each javadoc line and join.
+                lines = [
+                    l.strip().lstrip("*").strip()
+                    for l in dm.group(1).splitlines()
+                ]
+                lines = [l for l in lines if l and not l.startswith("@")]
+                if lines:
+                    desc = re.sub(r"\s+", " ", lines[0])
+            label = f"{method}()"
+            if desc:
+                budget = self._HIST_MAX_LEN - len(label) - 5
+                if len(desc) > budget > 0:
+                    desc = desc[: budget - 1] + "…"
+                if budget > 0:
+                    label = f"{method}()  ·  {desc}"
+            return label
+
+        # 2. Raw SQL — first SELECT/INSERT/UPDATE/DELETE/TRUNCATE
+        sm = self._HIST_SQL_KW_RE.search(text)
+        if sm:
+            kw = re.sub(r"\s+", " ", sm.group(1).upper())
+            return f"{kw} {sm.group(2)}"
+
+        # 3. First non-comment non-blank line
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(("/*", "*", "//")):
+                continue
+            if len(stripped) > self._HIST_MAX_LEN:
+                stripped = stripped[: self._HIST_MAX_LEN - 1] + "…"
+            return stripped
+
+        # 4. Fallback — collapsed text (legacy)
+        preview = text.replace("\n", " ⏎ ").strip()
+        if len(preview) > self._HIST_MAX_LEN:
+            preview = preview[: self._HIST_MAX_LEN - 1] + "…"
+        return preview
 
     def _load_from_history(self, text):
         self._clear_placeholder()
@@ -1619,6 +1764,44 @@ class TranslatorApp(_BaseTk):
             self.output_box.insert(tk.END, text)
         self.output_box.configure(state="disabled")
         self._refresh_output_stats(text or "")
+
+    def _refresh_stats_bar(self, stats):
+        """Show the design-doc statistics above the output. The bar is hidden
+        when stats are empty, the ■SQL概要 toggle is off, or the active
+        mode isn't Design Doc.
+
+        Stats live in a read-only `tk.Text` widget rather than a `Label` so
+        the user can highlight and copy any value (e.g. the column count)
+        without needing the rest of the design doc to come along."""
+        in_design = (self._mode.get() == "designdoc")
+        wanted = bool(self._show_stats.get()) and in_design and bool(stats)
+        if not wanted:
+            try: self._stats_bar.pack_forget()
+            except Exception: pass
+            return
+        text = "Stats:  " + "   ·   ".join(stats)
+        # Write into the Text widget (briefly enabled so insert() works, then
+        # restored to read-only via the <Key> handler bound at build time).
+        self._stats_lbl.configure(state="normal")
+        self._stats_lbl.delete("1.0", tk.END)
+        self._stats_lbl.insert("1.0", text)
+        # Auto-grow height to fit wrapped lines (cap at 4 to keep things tidy).
+        try:
+            self._stats_lbl.update_idletasks()
+            line_count = int(self._stats_lbl.index("end-1c").split(".")[0])
+            self._stats_lbl.configure(height=min(max(line_count, 1), 4))
+        except Exception:
+            pass
+        # Disable to block typing but still allow text selection.
+        self._stats_lbl.configure(state="disabled")
+        try:
+            self._stats_bar.pack(
+                side="top", fill="x", padx=2, pady=(2, 0),
+                before=self._output_container,
+            )
+        except Exception:
+            try: self._stats_bar.pack(side="top", fill="x", padx=2, pady=(2, 0))
+            except Exception: pass
 
     def _refresh_output_stats(self, text=None):
         """Show line / character counts in the bottom status bar.
@@ -2048,6 +2231,10 @@ class TranslatorApp(_BaseTk):
         from .dialogs.help import show_help_dialog
         show_help_dialog(self)
 
+    def open_inspect_dialog(self):
+        from .dialogs.inspect import open_inspect_dialog
+        open_inspect_dialog(self)
+
     # ── Hover tooltips on buttons (delayed show, hide on leave) ───────────────
     def _attach_tooltip(self, widget, text, delay_ms=500):
         state = {"job": None}
@@ -2083,6 +2270,7 @@ class TranslatorApp(_BaseTk):
             (self._translate_btn,"Translate the input (Ctrl+Enter)"),
             (self._copy_btn,     "Copy output to clipboard (Ctrl+Shift+C)"),
             (self._save_btn,     "Save output to a file (Ctrl+S)"),
+            (self._inspect_btn,  "Inspect SQL — bind positions, column lineage, warnings, reconstructed SQL"),
             (self._history_btn,  "Recent inputs"),
             (self._doctabs_newbtn,"Open a new document tab"),
         ]
@@ -2132,6 +2320,7 @@ class TranslatorApp(_BaseTk):
                 "design_show_having":      bool(self._show_having.get()),
                 "design_show_order":       bool(self._show_order.get()),
                 "design_show_footer":      bool(self._show_footer.get()),
+                "design_show_stats":       bool(self._show_stats.get()),
                 "pane_orient":             self._pane_orient,
                 "show_line_numbers":       bool(self._show_line_numbers.get()),
                 "word_wrap":               bool(self._word_wrap.get()),

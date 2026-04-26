@@ -5,6 +5,43 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **🔍 Inspect dialog** (Design Doc mode) — opens a tabbed window with a
+  deep-dive view of the parsed SQL: per-column lineage with chosen logical
+  name and ambiguity flag, list of unknown identifiers, sequential `?`
+  bind positions mapped to their target column, Java placeholder map
+  (`${expr}` → original Java expression with usage count), per-buffer
+  breakdown for multi-StringBuffer methods (main + helper roles), validation
+  warnings (column count vs. VALUES, unbound aliases, etc.), and the
+  reconstructed SQL pretty-printed with right-aligned clause keywords and
+  one `AND`/`OR` per line. All sections are selectable / copyable.
+- **■SQL概要 stats chip** above the output (Design Doc mode) — non-copyable
+  read-only Text widget summarising the parsed SQL: target table, column
+  counts, source (VALUES vs SELECT), `?` binds, Java embeds, JOIN/WHERE/
+  HAVING/GROUP BY/ORDER BY counts. Toggleable via `⚙ Sections ▾` →
+  `■SQL概要 (statistics)`. English labels.
+- **Section header counts** — every Design Doc section that lists items
+  shows `(N)` in its header (`■抽出項目 (14)`, `■結合条件 (2)`,
+  `■項目移送 (24)`, etc.). Inline, useful in copied docs.
+- **Smart history labels** — the `History` dropdown extracts the Java
+  method name and the first javadoc line so similar entries
+  (`/** ... */ private String …`) are distinguishable at a glance:
+  `getSyohinCdUpdateSQL()  ·  商品コード更新処理PreparedStatement作成`.
+  Falls back to `SELECT/UPDATE/...` + table for raw SQL.
+
+### Changed
+- **Reconstructed SQL** in the Inspect dialog is pretty-printed with
+  right-aligned clause keywords (`UPDATE`, `SET`, `WHERE`, `AND`, `OR`,
+  `JOIN`, `ORDER BY`, …) and one `AND`/`OR` per line. String- and
+  paren-aware, so subqueries and `'literal'` strings stay intact.
+
+### Fixed
+- **`■項目移送 (258)` count bug** — INSERT header now uses the explicit
+  `(col_list)` count when present, falling back to fields/values only as
+  a backstop.
+
+## [Pre-merge of PR #3]
+
+### Added
 - **⚙ Settings menu** — Theme, Layout, Filter, Exclusions, User Map, Open file,
   Reload JSON, Line numbers, Word wrap, and Auto-paste from clipboard are now
   consolidated under a single menubutton in the top bar. The action bar keeps
