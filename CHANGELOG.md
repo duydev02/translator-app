@@ -5,6 +5,24 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **📚 Schema Browser** — searchable two-pane window listing every physical
+  table with its logical name and the columns of the selected table, with
+  hints pointing to other tables that share the same column. Actions to copy
+  the physical or logical name to the clipboard and to add a column to the
+  User Map. Open via Settings → `📚 Schema Browser…` or the command palette.
+- **📋 Snippets** — save the current input as a named snippet (with optional
+  comma-separated tags) and reload it later. Snippet name auto-suggested
+  from the Java method signature when present. Search across name/tags/
+  content; double-click or Enter to load. Persisted in
+  `translator_settings.json` under a `snippets` array.
+- **⌘ Command palette** — `Cmd+P` / `Ctrl+P` opens a fuzzy-search popup over
+  all commands (mode/direction switches, every dialog, settings toggles,
+  doc-tab navigation, zoom, file ops, help). Substring matches rank above
+  fuzzy matches; categories shown next to each entry.
+- **Line-number alignment fix** — line numbers in the input/output gutter
+  now anchor to each line's exact paint position via Tk's `dlineinfo`
+  (IDLE-style). Numbers track text rows correctly through font zoom,
+  word-wrap toggles, and blank lines.
 - **🔍 Inspect dialog** (Design Doc mode) — opens a tabbed window with a
   deep-dive view of the parsed SQL: per-column lineage with chosen logical
   name and ambiguity flag, list of unknown identifiers, sequential `?`

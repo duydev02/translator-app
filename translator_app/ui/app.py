@@ -190,6 +190,9 @@ class TranslatorApp(_BaseTk):
         self.bind_all("<Control-minus>",      lambda e: self.zoom_out())
         self.bind_all("<Control-0>",          lambda e: self.zoom_reset())
         self.bind_all("<Control-l>",          lambda e: self.toggle_line_numbers())
+        # Command palette (cross-platform)
+        self.bind_all("<Control-p>",          lambda e: self.open_command_palette())
+        self.bind_all("<Command-p>",          lambda e: self.open_command_palette())
         self.bind_all("<Control-t>",          lambda e: self._new_doc_tab())
         self.bind_all("<Control-w>",          lambda e: self._close_doc_tab(self._active_doc))
         self.bind_all("<Control-Tab>",        lambda e: self._cycle_doc_tab(1))
@@ -344,6 +347,11 @@ class TranslatorApp(_BaseTk):
         self._settings_menu.add_command(label="⚙  Filter…",     command=self.open_filter_dialog)
         self._settings_menu.add_command(label="⊘  Exclusions…", command=self.open_exclusions_dialog)
         self._settings_menu.add_command(label="🖉  User Map…",  command=self.open_user_map_dialog)
+        self._settings_menu.add_separator()
+        self._settings_menu.add_command(label="📚  Schema Browser…", command=self.open_schema_browser)
+        self._settings_menu.add_command(label="📋  Snippets…",        command=self.open_snippets_dialog)
+        self._settings_menu.add_command(label="⌘  Command palette  (Ctrl/Cmd+P)",
+                                        command=self.open_command_palette)
         self._settings_menu.add_separator()
         self._settings_menu.add_command(label="📂  Open file…",  command=self.on_open_file)
         self._settings_menu.add_command(label="⟳  Reload JSON", command=self.on_reload_json)
@@ -2234,6 +2242,18 @@ class TranslatorApp(_BaseTk):
     def open_inspect_dialog(self):
         from .dialogs.inspect import open_inspect_dialog
         open_inspect_dialog(self)
+
+    def open_schema_browser(self):
+        from .dialogs.schema_browser import open_schema_browser
+        open_schema_browser(self)
+
+    def open_snippets_dialog(self):
+        from .dialogs.snippets import open_snippets_dialog
+        open_snippets_dialog(self)
+
+    def open_command_palette(self):
+        from .dialogs.command_palette import open_command_palette
+        open_command_palette(self)
 
     # ── Hover tooltips on buttons (delayed show, hide on leave) ───────────────
     def _attach_tooltip(self, widget, text, delay_ms=500):
