@@ -193,6 +193,11 @@ class TranslatorApp(_BaseTk):
         # Command palette (cross-platform)
         self.bind_all("<Control-p>",          lambda e: self.open_command_palette())
         self.bind_all("<Command-p>",          lambda e: self.open_command_palette())
+        # Schema Browser / Snippets quick-access
+        self.bind_all("<Control-b>",          lambda e: self.open_schema_browser())
+        self.bind_all("<Command-b>",          lambda e: self.open_schema_browser())
+        self.bind_all("<Control-j>",          lambda e: self.open_snippets_dialog())
+        self.bind_all("<Command-j>",          lambda e: self.open_snippets_dialog())
         self.bind_all("<Control-t>",          lambda e: self._new_doc_tab())
         self.bind_all("<Control-w>",          lambda e: self._close_doc_tab(self._active_doc))
         self.bind_all("<Control-Tab>",        lambda e: self._cycle_doc_tab(1))
@@ -205,6 +210,9 @@ class TranslatorApp(_BaseTk):
         # Right-click context menu
         self.input_box.bind("<Button-3>",  lambda e: self._on_right_click(e, self.input_box))
         self.output_box.bind("<Button-3>", lambda e: self._on_right_click(e, self.output_box))
+        # macOS / Linux: Control-click and two-finger trackpad → Button-2.
+        self.input_box.bind("<Button-2>",  lambda e: self._on_right_click(e, self.input_box))
+        self.output_box.bind("<Button-2>", lambda e: self._on_right_click(e, self.output_box))
 
         # Auto-translate + input highlight
         self.input_box.bind("<KeyRelease>", self._on_input_change)
@@ -230,11 +238,16 @@ class TranslatorApp(_BaseTk):
         # Attach hover tooltips to discoverability-critical buttons
         self._install_button_tooltips()
 
-        # Drag & drop
+        # Drag & drop with visual feedback (a translucent overlay across the
+        # input box telling the user "drop a file here").
+        self._drop_overlay = None
         if _DND_AVAILABLE:
             try:
                 self.drop_target_register(DND_FILES)
-                self.dnd_bind("<<Drop>>", self._on_file_drop)
+                self.dnd_bind("<<Drop>>",       self._on_file_drop)
+                self.dnd_bind("<<DropEnter>>",  self._on_drop_enter)
+                self.dnd_bind("<<DropLeave>>",  self._on_drop_leave)
+                self.dnd_bind("<<DropPosition>>", lambda e: None)
             except Exception:
                 pass
 
@@ -248,6 +261,31 @@ class TranslatorApp(_BaseTk):
         self.bind_all("<Control-q>",     lambda e: self.on_close())
         # Pending auto-save handle for doc-tab input.
         self._docs_save_job = None
+
+        # Auto-focus the input box so users can paste / type immediately on
+        # launch without having to click first.
+        self.after(120, self._initial_focus)
+        # Show a one-time welcome toast pointing new users at F1 / Cmd+P.
+        if not self._settings.get("welcomed", False):
+            self.after(700, self._show_welcome_toast)
+
+    def _initial_focus(self):
+        try:
+            self.input_box.focus_set()
+        except Exception:
+            pass
+
+    def _show_welcome_toast(self):
+        try:
+            self._toast.show(
+                "Welcome — press F1 for shortcuts · Ctrl/Cmd+P for command palette",
+                4000, "info",
+            )
+            self._settings["welcomed"] = True
+            try: save_settings(self._settings)
+            except Exception: pass
+        except Exception:
+            pass
 
     # ── Data loading ──────────────────────────────────────────────────────────
     def _load_data(self):
@@ -348,13 +386,32 @@ class TranslatorApp(_BaseTk):
         self._settings_menu.add_command(label="⊘  Exclusions…", command=self.open_exclusions_dialog)
         self._settings_menu.add_command(label="🖉  User Map…",  command=self.open_user_map_dialog)
         self._settings_menu.add_separator()
-        self._settings_menu.add_command(label="📚  Schema Browser…", command=self.open_schema_browser)
-        self._settings_menu.add_command(label="📋  Snippets…",        command=self.open_snippets_dialog)
-        self._settings_menu.add_command(label="⌘  Command palette  (Ctrl/Cmd+P)",
-                                        command=self.open_command_palette)
+        self._settings_menu.add_command(
+            label="📚  Schema Browser…",
+            accelerator="Ctrl+B / Cmd+B",
+            command=self.open_schema_browser,
+        )
+        self._settings_menu.add_command(
+            label="📋  Snippets…",
+            accelerator="Ctrl+J / Cmd+J",
+            command=self.open_snippets_dialog,
+        )
+        self._settings_menu.add_command(
+            label="⌘  Command palette",
+            accelerator="Ctrl+P / Cmd+P",
+            command=self.open_command_palette,
+        )
         self._settings_menu.add_separator()
-        self._settings_menu.add_command(label="📂  Open file…",  command=self.on_open_file)
-        self._settings_menu.add_command(label="⟳  Reload JSON", command=self.on_reload_json)
+        self._settings_menu.add_command(
+            label="📂  Open file…",
+            accelerator="—",
+            command=self.on_open_file,
+        )
+        self._settings_menu.add_command(
+            label="⟳  Reload JSON",
+            accelerator="Ctrl+R",
+            command=self.on_reload_json,
+        )
         self._settings_btn.pack(side="right", pady=8)
 
         # ── Doc-tab bar (multi-input) ────────────────────────────────────────
@@ -411,6 +468,11 @@ class TranslatorApp(_BaseTk):
         self._actionbar = tk.Frame(top_pane, height=46)
         self._actionbar.pack(side="bottom", fill="x", pady=8)
         self._actionbar.pack_propagate(False)
+
+        # Spacer that mirrors the height of the output's `_stats_bar` so the
+        # input pane and the output pane stay vertically aligned (same y for
+        # line 1 of each). Hidden when the stats bar is hidden.
+        self._input_spacer = tk.Frame(top_pane, height=0)
 
         # Input fills whatever's left between header and action bar.
         # Wrap in a container so a line-number canvas can sit to its left.
@@ -1645,8 +1707,38 @@ class TranslatorApp(_BaseTk):
         # tkinterdnd2 wraps paths with spaces in {braces}; parse them
         paths = re.findall(r"\{([^}]+)\}|(\S+)", raw)
         paths = [a or b for a, b in paths]
+        self._on_drop_leave(None)
         if paths:
             self._load_file_into_input(paths[0])
+
+    def _on_drop_enter(self, _event):
+        """Show a translucent overlay across the input pane signalling that
+        a drop is accepted. Created lazily."""
+        try:
+            t = THEMES[self._theme]
+            if self._drop_overlay is None or not self._drop_overlay.winfo_exists():
+                self._drop_overlay = tk.Frame(
+                    self.input_box, bg=t["accent"],
+                    highlightthickness=2, highlightbackground=t["accent_fg"],
+                )
+                tk.Label(
+                    self._drop_overlay,
+                    text="📂  Drop file here to load",
+                    font=self._btn,
+                    bg=t["accent"], fg=t["accent_fg"],
+                ).place(relx=0.5, rely=0.5, anchor="center")
+            # Cover the input box.
+            self._drop_overlay.place(x=0, y=0, relwidth=1, relheight=1)
+            self._drop_overlay.lift()
+        except Exception:
+            pass
+
+    def _on_drop_leave(self, _event):
+        try:
+            if self._drop_overlay is not None and self._drop_overlay.winfo_exists():
+                self._drop_overlay.place_forget()
+        except Exception:
+            pass
 
     # ── Input change handler (autotranslate + highlight) ──────────────────────
     def _on_input_change(self, event=None):
@@ -1786,6 +1878,7 @@ class TranslatorApp(_BaseTk):
         if not wanted:
             try: self._stats_bar.pack_forget()
             except Exception: pass
+            self._sync_input_spacer(0)
             return
         text = "Stats:  " + "   ·   ".join(stats)
         # Write into the Text widget (briefly enabled so insert() works, then
@@ -1810,6 +1903,32 @@ class TranslatorApp(_BaseTk):
         except Exception:
             try: self._stats_bar.pack(side="top", fill="x", padx=2, pady=(2, 0))
             except Exception: pass
+        # Mirror the stats-bar height with a spacer in the input pane so
+        # the line-1 of each side stays vertically aligned (otherwise the
+        # right pane is pushed down by the extra row, which looks off).
+        try:
+            self._stats_bar.update_idletasks()
+            self._sync_input_spacer(self._stats_bar.winfo_reqheight())
+        except Exception:
+            self._sync_input_spacer(20)
+
+    def _sync_input_spacer(self, height_px):
+        """Show / resize the invisible spacer in the input pane so the input
+        and output text widgets share the same top y-coordinate."""
+        try:
+            if not height_px:
+                self._input_spacer.pack_forget()
+                return
+            self._input_spacer.configure(height=height_px)
+            # +2 pady inside the bar plus the (2,0) outside pad on the stats
+            # bar — match by packing similarly so the totals line up.
+            self._input_spacer.pack(
+                side="top", fill="x", padx=2, pady=(2, 0),
+                before=self._input_container,
+            )
+            self._input_spacer.pack_propagate(False)
+        except Exception:
+            pass
 
     def _refresh_output_stats(self, text=None):
         """Show line / character counts in the bottom status bar.
@@ -2085,26 +2204,47 @@ class TranslatorApp(_BaseTk):
     def _on_right_click(self, event, widget):
         try:
             selected = widget.selection_get()
+            selected = selected.strip("\r\n")
         except tk.TclError:
-            return
-        selected = selected.strip("\r\n")
-        if not selected.strip():
-            return
+            selected = ""
 
         t = THEMES[self._theme]
         menu = tk.Menu(self, tearoff=0,
             bg=t["surface"], fg=t["fg"],
             activebackground=t["accent"], activeforeground=t["accent_fg"],
             bd=0, relief="flat")
-        preview = selected if len(selected) <= 40 else selected[:37] + "…"
-        preview = preview.replace("\n", "⏎")
 
-        if selected in self._exclusions:
-            menu.add_command(label=f"✕  Remove from exclusions:  «{preview}»",
-                command=lambda: self._remove_exclusion(selected))
-        else:
-            menu.add_command(label=f"⊘  Add to exclusions:  «{preview}»",
-                command=lambda: self._add_exclusion(selected))
+        # When there's a selection: exclusion add/remove first (the original
+        # behaviour). Then the broader "Copy selection" / mode actions.
+        if selected.strip():
+            preview = selected if len(selected) <= 40 else selected[:37] + "…"
+            preview = preview.replace("\n", "⏎")
+            if selected in self._exclusions:
+                menu.add_command(label=f"✕  Remove from exclusions:  «{preview}»",
+                    command=lambda: self._remove_exclusion(selected))
+            else:
+                menu.add_command(label=f"⊘  Add to exclusions:  «{preview}»",
+                    command=lambda: self._add_exclusion(selected))
+            menu.add_separator()
+            menu.add_command(label="Copy selection",
+                command=lambda: self._copy_text_to_clipboard(selected))
+            menu.add_command(label="Add column → User Map",
+                command=lambda: self._add_selection_to_user_map(selected))
+            menu.add_separator()
+
+        # Actions that depend on the *widget* (input vs output):
+        if widget is self.output_box:
+            menu.add_command(label="⎘  Copy all output",       command=self.on_copy)
+            menu.add_command(label="💾  Save output to file…", command=self.on_export)
+            menu.add_command(label="Find in output  (Ctrl+F)", command=self.open_search_bar)
+            if self._mode.get() == "designdoc":
+                menu.add_separator()
+                menu.add_command(label="🔍  Inspect SQL…", command=self.open_inspect_dialog)
+        else:  # input_box
+            menu.add_command(label="✕  Clear input  (Ctrl+⌫)", command=self.on_clear)
+            menu.add_command(label="📋  Save as snippet…",      command=self.open_snippets_dialog)
+            menu.add_command(label="📂  Open file…",             command=self.on_open_file)
+
         menu.add_separator()
         menu.add_command(label="Open exclusion list…", command=self.open_exclusions_dialog)
 
@@ -2112,6 +2252,41 @@ class TranslatorApp(_BaseTk):
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _copy_text_to_clipboard(self, text):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            preview = text if len(text) <= 30 else text[:27] + "…"
+            self._toast.show(f"Copied: {preview}", 1100, "success")
+        except Exception:
+            pass
+
+    def _add_selection_to_user_map(self, selected):
+        """Open the User Map with the selected text pre-populated as the
+        physical name, so the user can quickly add an override."""
+        # Lightweight prompt: ask for the logical name only; physical comes
+        # from the selection.
+        from tkinter import simpledialog
+        phys = selected.strip()
+        if not phys:
+            return
+        logical = simpledialog.askstring(
+            "Add to User Map",
+            f"Logical name for '{phys}':",
+            parent=self,
+        )
+        if not logical or not logical.strip():
+            return
+        cols = self._user_map.setdefault("columns", {})
+        cols[phys] = logical.strip()
+        from ..config import save_user_map
+        try: save_user_map(self._user_map)
+        except Exception: pass
+        # Re-merge so the override is picked up immediately
+        try: self._load_data(); self.on_translate()
+        except Exception: pass
+        self._toast.show(f"User Map: {phys} → {logical}", 1300, "success")
 
     def _add_exclusion(self, text):
         text = text.strip("\r\n")

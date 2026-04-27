@@ -969,6 +969,24 @@ def _count_placeholders(parsed, expr_map):
     return qmark, expr_count
 
 
+def _stat_target(parsed, expr_map):
+    """Format a parsed `target` for display in stats. Resolves Java
+    placeholders to `${var}` so users see the variable name instead of
+    the raw `\\uE001N\\uE002` markers (which render as a stray digit)."""
+    raw = parsed.get("target", "") or ""
+    if not raw:
+        return "(unknown)"
+    def repl(m):
+        idx = int(m.group(1))
+        expr = (expr_map.get(idx, "") or "").strip()
+        if not expr:
+            return "${?}"
+        if len(expr) > 60:
+            expr = expr[:57] + "…"
+        return "${" + expr + "}"
+    return _EXPR_RE.sub(repl, raw)
+
+
 def _build_stats_block(parsed, expr_map):
     """Return an indented list of one-liner stats describing the parsed
     statement. Empty list ⇒ no stats block is shown."""
@@ -977,6 +995,8 @@ def _build_stats_block(parsed, expr_map):
     stype = parsed["type"]
     rows = []
     qmark, expr_count = _count_placeholders(parsed, expr_map)
+
+    target_str = _stat_target(parsed, expr_map)
 
     if stype == "INSERT":
         sel = parsed.get("select")
@@ -989,7 +1009,7 @@ def _build_stats_block(parsed, expr_map):
         )
         if not n_cols:
             n_cols = n_vals
-        rows.append(f"Target table: {parsed.get('target', '') or '(unknown)'}")
+        rows.append(f"Target table: {target_str}")
         if n_cols:
             rows.append(f"Columns: {n_cols}")
         if n_vals and n_vals != n_cols:
@@ -1001,14 +1021,14 @@ def _build_stats_block(parsed, expr_map):
 
     elif stype == "UPDATE":
         rows.append(
-            f"Target table: {parsed.get('target','') or '(unknown)'}"
+            f"Target table: {target_str}"
             + (f"  (alias {parsed['alias']})" if parsed.get("alias") else "")
         )
         rows.append(f"SET columns: {len(parsed.get('set') or [])}")
         rows.append(f"WHERE conditions: {len(parsed.get('where') or [])}")
 
     elif stype == "DELETE":
-        rows.append(f"Target table: {parsed.get('target','') or '(unknown)'}")
+        rows.append(f"Target table: {target_str}")
         rows.append(f"WHERE conditions: {len(parsed.get('where') or [])}")
 
     elif stype in ("SELECT", "SELECT_UNION"):
@@ -1043,7 +1063,7 @@ def _build_stats_block(parsed, expr_map):
                     + (f"  ·  ORDER BY: {total_order}" if total_order else ""))
 
     elif stype == "TRUNCATE":
-        rows.append(f"Target table: {parsed.get('target','') or '(unknown)'}")
+        rows.append(f"Target table: {target_str}")
 
     if qmark or expr_count:
         bits = []
@@ -1143,8 +1163,7 @@ def _emit_update(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
     def _emit_set():
         if not flags.get("show_projection", True):
             return
-        n = len(parsed.get("set", []))
-        lines.append(f"■更新項目 ({n})")
+        lines.append("■更新項目")
         lines.append(_TAB + "カラム名" + _COL_TABS + "セット内容")
         for a in parsed.get("set", []):
             col = _render_name(a["col"], translate_fn, uppercase)
@@ -1155,7 +1174,7 @@ def _emit_update(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
     def _emit_where():
         if not flags.get("show_where", True) or not parsed.get("where"):
             return
-        lines.append(f"■抽出条件 ({len(parsed['where'])})")
+        lines.append("■抽出条件")
         for c in parsed["where"]:
             lines.extend(_emit_condition_lines(c, expr_map, translate_fn, uppercase, indent=1, flags=flags))
         lines.append("")
@@ -1181,7 +1200,7 @@ def _emit_delete(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
         lines.append("")
 
     if flags.get("show_where", True) and parsed.get("where"):
-        lines.append(f"■抽出条件 ({len(parsed['where'])})")
+        lines.append("■抽出条件")
         for c in parsed["where"]:
             lines.extend(_emit_condition_lines(c, expr_map, translate_fn, uppercase, indent=1, flags=flags))
         lines.append("")
@@ -1226,8 +1245,7 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
     def _emit_projection():
         if not flags.get("show_projection", True):
             return
-        n = len(parsed.get("fields", []))
-        out.append(ind + f"■抽出項目 ({n})" + distinct_str)
+        out.append(ind + "■抽出項目" + distinct_str)
         for f in parsed.get("fields", []):
             out.append(ind + _TAB + _render_value(f, expr_map, translate_fn, uppercase=uppercase))
         out.append("")
@@ -1237,16 +1255,14 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
         if not (from_info and from_info.get("main")):
             return
         if flags.get("show_from", True):
-            n_tables = 1 + len(from_info.get("cross") or [])
-            header = "■抽出テーブル" + (f" ({n_tables})" if n_tables > 1 else "")
-            out.append(ind + header)
+            out.append(ind + "■抽出テーブル")
             _emit_table_ref_item(from_info["main"])
             # Old-style comma-separated FROM tables (cross-join syntax).
             for ref in from_info.get("cross", []) or []:
                 _emit_table_ref_item(ref)
             out.append("")
         if flags.get("show_join", True) and from_info.get("joins"):
-            out.append(ind + f"■結合条件 ({len(from_info['joins'])})")
+            out.append(ind + "■結合条件")
             for join in from_info["joins"]:
                 ja = dict(JOIN_PATTERNS).get(join["kind"], join["kind"])
                 out.append(ind + _TAB + ja)
@@ -1259,7 +1275,7 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
 
     def _emit_where():
         if flags.get("show_where", True) and parsed.get("where"):
-            out.append(ind + f"■抽出条件 ({len(parsed['where'])})")
+            out.append(ind + "■抽出条件")
             for c in parsed["where"]:
                 out.extend(_emit_condition_lines(
                     c, expr_map, translate_fn, uppercase,
@@ -1268,14 +1284,14 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
 
     def _emit_group():
         if flags.get("show_group", True) and parsed.get("group_by"):
-            out.append(ind + f"■グループ化条件 ({len(parsed['group_by'])})")
+            out.append(ind + "■グループ化条件")
             for g in parsed["group_by"]:
                 out.append(ind + _TAB + _render_value(g, expr_map, translate_fn, uppercase=uppercase))
             out.append("")
 
     def _emit_having():
         if flags.get("show_having", True) and parsed.get("having"):
-            out.append(ind + f"■集計後抽出条件 ({len(parsed['having'])})")
+            out.append(ind + "■集計後抽出条件")
             for c in parsed["having"]:
                 out.extend(_emit_condition_lines(
                     c, expr_map, translate_fn, uppercase,
@@ -1284,7 +1300,7 @@ def _emit_select_block(parsed, expr_map, translate_fn, uppercase, indent=0, flag
 
     def _emit_order():
         if flags.get("show_order", True) and parsed.get("order_by"):
-            out.append(ind + f"■並び順 ({len(parsed['order_by'])})")
+            out.append(ind + "■並び順")
             for o in parsed["order_by"]:
                 out.append(ind + _TAB + _render_value(o, expr_map, translate_fn, uppercase=uppercase))
             out.append("")
@@ -1359,12 +1375,7 @@ def _emit_insert(parsed, expr_map, translate_fn, uppercase, lines, flags=None):
     def _emit_mapping():
         if not flags.get("show_projection", True):
             return
-        # The header count should reflect what the user is actually inserting.
-        # Prefer the explicit (col_list) count from `columns`; fall back to the
-        # rendered rows (fields or values) only if no col_list was given.
-        n_rows = len(fields) if fields else len(values or [])
-        n = len(columns) or n_rows
-        lines.append(f"■項目移送 ({n})")
+        lines.append("■項目移送")
         lines.append(_TAB + "カラム名" + _COL_TABS + "セット内容")
         if fields:
             for i, f in enumerate(fields):
@@ -1916,14 +1927,41 @@ def java_to_design_doc(
     try:
         sql, expr_map, javadoc, func = _build_sql_from_java(java_code)
     except Exception as e:
-        return f"(Java parse error: {e})"
+        return (
+            "⚠  Could not parse the Java input.\n\n"
+            f"Reason : {e}\n\n"
+            "Tips:\n"
+            "  • Make sure you pasted the FULL method including its braces.\n"
+            "  • The translator looks for `<buffer>.append(\"...\")` calls and\n"
+            "    `return <buffer>.toString();`. Builder calls outside of a\n"
+            "    method body (or wrapped in odd helpers) may not be detected.\n"
+            "  • If the method uses an unusual SQL builder API (not\n"
+            "    StringBuffer/StringBuilder), Inline Replace mode might be\n"
+            "    a better fit."
+        )
 
     if not sql.strip():
-        return "(No SQL found — did the method use sb.append(...)?)"
+        return (
+            "⚠  No SQL found.\n\n"
+            "The translator extracts SQL from `<buffer>.append(\"...\")` calls.\n"
+            "If your method builds its query a different way, paste the SQL\n"
+            "directly and switch to Inline Replace or Translation Table mode."
+        )
 
     parsed = _parse_sql(sql)
     if parsed.get("type") == "UNKNOWN":
-        return f"(Unknown SQL statement type)\n\n{sql}"
+        snippet = sql.strip()
+        if len(snippet) > 320:
+            snippet = snippet[:317] + "…"
+        return (
+            "⚠  Unknown SQL statement type.\n\n"
+            "The Design Doc generator handles SELECT / INSERT / UPDATE /\n"
+            "DELETE / TRUNCATE (with UNION, subqueries, JOINs). If you're\n"
+            "trying to translate a stored-procedure call or DDL, switch to\n"
+            "Inline Replace mode to see term-by-term replacements.\n\n"
+            "Extracted SQL preview:\n"
+            f"{snippet}"
+        )
 
     ctx = _build_table_context(parsed, table_index)
 
