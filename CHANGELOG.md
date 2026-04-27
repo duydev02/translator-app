@@ -5,6 +5,30 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **Inspect dialog redesign** — header summary cards (`Statement`, `Target`,
+  `Columns`, `? binds`, `Warnings ✓`, plus `Ambiguous` / `Unknown` when
+  relevant), per-tab search box with row counters, sortable column headers
+  (click to sort), double-click any row to copy its primary value, and
+  syntax highlighting in the Reconstructed SQL tab (keywords / strings /
+  `${placeholders}` / numbers). New `↻ Refresh` button re-parses the
+  current input in place. Keyboard shortcuts: `Ctrl/Cmd+1..6` jump to
+  tabs, `Esc` closes.
+- **First-run welcome toast** pointing new users at `F1` and `Cmd/Ctrl+P`.
+  Shown once, tracked via a `welcomed: true` setting.
+- **Auto-focus input on launch** so users can paste / type immediately
+  without clicking.
+- **Drag-drop visual feedback** — translucent accent overlay across the
+  input box reading `📂 Drop file here to load` while a file is being
+  dragged in. Hides on drop or leave.
+- **Right-click context menus** on input and output:
+  - Output: `⎘ Copy all output`, `💾 Save…`, `Find in output`, and
+    `🔍 Inspect SQL` (Design Doc mode).
+  - Input: `✕ Clear input`, `📋 Save as snippet`, `📂 Open file`.
+  - Selected text in either: `Copy selection`, `Add column → User Map`
+    (with a quick logical-name prompt that re-runs translation
+    immediately).
+- **New shortcuts**: `Cmd/Ctrl+B` opens Schema Browser, `Cmd/Ctrl+J`
+  opens Snippets. Settings menu items now show their accelerators.
 - **📚 Schema Browser** — searchable two-pane window listing every physical
   table with its logical name and the columns of the selected table, with
   hints pointing to other tables that share the same column. Actions to copy
@@ -51,8 +75,22 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   right-aligned clause keywords (`UPDATE`, `SET`, `WHERE`, `AND`, `OR`,
   `JOIN`, `ORDER BY`, …) and one `AND`/`OR` per line. String- and
   paren-aware, so subqueries and `'literal'` strings stay intact.
+- **Friendlier parse errors** — `java_to_design_doc()` now returns an
+  explanatory message with concrete next-step hints when the Java
+  doesn't parse, no SQL is found, or the statement type is unknown
+  (instead of one-line cryptic notes).
 
 ### Fixed
+- **Stats target shows variable name, not `0`** — when the target table
+  is a Java variable (`UPDATE <buffer> + tableName + " SET ..."`), the
+  Inspect dialog summary card and the stats chip resolve the placeholder
+  to `${tableName}` instead of leaking the bare placeholder index.
+- **Horizontal layout alignment** — when the `■SQL概要` stats bar is
+  shown above the output, the input pane reserves a matching invisible
+  spacer so line 1 of each side stays vertically aligned.
+- **No more `(N)` count noise in the design doc text** — section
+  counts like `■項目移送 (24)` were being copied along with the doc.
+  Counts now live only in the out-of-band stats chip and Inspect dialog.
 - **`■項目移送 (258)` count bug** — INSERT header now uses the explicit
   `(col_list)` count when present, falling back to fields/values only as
   a backstop.
