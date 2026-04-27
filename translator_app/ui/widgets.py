@@ -77,6 +77,11 @@ class LineNumberCanvas(tk.Canvas):
         except tk.TclError:
             tfont = font.Font(font=self.text.cget("font"))
 
+        # IDLE-style line numbering: walk the visible logical lines via
+        # dlineinfo (which returns the Text widget's exact paint coordinates,
+        # already accounting for pady / font ascent / spacing options).
+        # Anchor numbers to the line's TOP, which aligns the digit caps with
+        # the text caps the way readers expect.
         w = max(self.winfo_width() - 4, 4)
         i = self.text.index("@0,0")
         steps = 0
@@ -87,13 +92,12 @@ class LineNumberCanvas(tk.Canvas):
                 break
             if dline is None:
                 break
-            _, y, _, h, _ = dline
+            _x, y, _bw, _h, _baseline = dline
             num = i.split(".")[0]
             self.create_text(
-                w, y + h / 2,
-                anchor="e", text=num, fill=fg, font=tfont,
+                w, y, anchor="ne", text=num, fill=fg, font=tfont,
             )
-            nxt = self.text.index(f"{i}+1line")
+            nxt = self.text.index(f"{i}+1lines")
             if nxt == i:
                 break
             i = nxt
