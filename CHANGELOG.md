@@ -107,6 +107,17 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   new clones can copy `data/db_schema_output.sample.json` to bootstrap.
 
 ### Fixed
+- **Schema Browser search no longer fights itself** — the single search
+  box that filtered both the Tables tree *and* the Columns tree was the
+  reason that selecting `R_SYOHIN` after searching for it produced an
+  empty columns view (the same query was excluding rows like
+  `SYOHIN_CD`). The dialog now has **two scoped searches**, one above
+  each pane: `🔎 tables` filters tables only, `🔎 columns` filters
+  columns only. Each pane shows its own row count. A `Show all` button
+  appears in the columns search bar while a table is selected, so one
+  click brings the global column list back. `Esc` inside a search
+  entry clears it (so it takes one keystroke to escape a stale query)
+  before falling through to the dialog-level Esc-to-close.
 - **Filter scope leak** — selecting only a schema in the Filter dialog
   no longer lets tables from other schemas slip through. The Tables
   list now scopes to the selected schemas (out-of-scope checkboxes are
