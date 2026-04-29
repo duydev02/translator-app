@@ -6,25 +6,60 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 
 ### Added
 - **🛠 Tools menu + Extract SQL from log…** (`Ctrl+Shift+L`) — new
-  developer utility that reads a `stclibApp.log` (the log file
-  produced by `commons.dao.PreparedStatementEx`), finds an entry by
-  its `id=<HEX>` token, and substitutes the `?` placeholders in the
-  SQL with the bound parameters from the matching execute line. Dialog
-  mirrors the team's existing Excel macro: log-file picker, query-id
-  input, three side-by-side panes (SQL with `?` / raw param blob /
-  combined result), counts (SQL length, `?` count, params count), and
-  buttons for **Process / Get last SQL / Clear / Copy result / Send
-  to translator input**. The last button drops the runnable SQL
-  straight into the active doc tab so Inline Replace or Design Doc
-  re-runs against real values. A new `🛠 Tools` menubutton next to
-  `⚙ Settings` houses this and future developer utilities so the
-  translator's main UI stays clean. Param formatter recognises
-  `STRING / INT / DECIMAL / DOUBLE / DATE / TIMESTAMP / NULL /
-  BOOLEAN / BYTES`; unknown types fall back to single-quoted strings.
-  Quote-aware substitution skips `?` inside string literals. Last-used
-  log path is persisted in `translator_settings.json`. Reachable from
-  the Tools menu, the command palette, the input pane's right-click
-  context menu, and the keyboard.
+  developer utility that parses an entire `stclibApp.log`, surfaces
+  the 1–2 *primary* business queries above the dozens of
+  infrastructure calls, and combines `?` placeholders with bound
+  parameters into a runnable SQL.
+
+  **Browse mode** (default): pick a log from a recent-paths dropdown
+  (up to 8 — designed for hopping between sub-projects like
+  `lawmasterhansoku-web` and `lawdailyorder-web`); the dialog parses
+  the whole file and shows every prepared statement in a treeview,
+  grouped under the user request that triggered each batch
+  (`commons.struts.RequestProcessor,callMethod` markers, with
+  1-second time-gap fallback for orphans). Each statement carries its
+  timestamp, hex id, DAO short name, statement type, target tables,
+  bind count, and a primary-vs-noise score; statements scoring ≥ 30
+  get a ★ tag. A 🔎 search box filters by id / DAO / table / SQL
+  substring. **☑ Hide infrastructure** (on by default) shows only ★
+  statements. Click a row → SQL / Params / Result render in tabs
+  below. The first ★ statement is auto-selected after each load.
+
+  **Scoring** combines DAO package signal (configurable
+  `noise_packages` defaults to `swc.commons` + `mdware.common`;
+  optional `primary_packages` adds a +50 bonus per match), SQL length,
+  `WITH` / `JOIN` / `UNION` presence, bound-param count, and a
+  noise-table list (`SYSTEM_CONTROL`, `DT_TABLE_LOG`, `R_MESSAGE`,
+  `R_DICTIONARY_CONTROL`, `R_NAMECTF`). All thresholds and lists are
+  per-project in `translator_settings.json`. A 2-pass FQCN fill
+  ensures statements whose `InvokeDao` line appears *after* their
+  init line (e.g. when the log file starts mid-stream) still get the
+  right DAO attribution.
+
+  **Direct mode** is preserved as a fallback for users who already
+  have the SQL + param blob on the clipboard and don't have the log
+  file handy — three side-by-side panes with a Process button, same
+  combiner.
+
+  **Result actions**: *Copy result* (clipboard) and *Send to
+  translator input* (drops the runnable SQL into the active doc tab
+  and re-runs translation immediately, so Inline Replace / Design Doc
+  render against real values).
+
+  **Architecture**: a new `🛠 Tools` menubutton sits next to
+  `⚙ Settings` in the top bar; future developer utilities slot in
+  under there without crowding the translation UI. Param formatter
+  recognises `STRING / CHAR / VARCHAR / CLOB / INT / BIGINT / DECIMAL
+  / DOUBLE / FLOAT / DATE / TIMESTAMP / TIME / NULL / BOOLEAN / BYTES
+  / BLOB`; unknown types fall back to single-quoted strings.
+  Quote-aware substitution skips `?` inside string literals.
+  Reachable from the Tools menu, the command palette, the input
+  pane's right-click context menu, and `Ctrl+Shift+L` /
+  `Cmd+Shift+L`.
+
+  Settings auto-migrate from the v1 single-`last_path` shape to the
+  v2 `recent_paths` list on first open, so existing users don't lose
+  their saved path.
 - **`Ctrl+Shift+B` — Schema Browser scoped to input names** — collects
   every physical identifier in the current input that the translator
   knows about, opens the Schema Browser, and pre-filters both panes

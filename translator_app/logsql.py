@@ -1,7 +1,8 @@
-"""Read a `stclibApp.log`, find a prepared-statement entry by `id=<HEX>`,
-combine the SQL with its bound parameters, and return the executable SQL.
+"""Read a `stclibApp.log`, find prepared-statement entries, score them so the
+1–2 *primary* business queries surface above the dozens of infrastructure
+calls, and combine SQL + bound params into runnable SQL.
 
-Log format observed in the wild (real `stclibApp.log` examples):
+Log format observed in real `stclibApp.log` files:
 
     2026-04-29 11:07:42,DEBUG,commons.dao.PreparedStatementEx,<init>              ,CreatePreparedStatement id=189369c1   sql= WITH TMP_TBL AS  …
     2026-04-29 11:07:42,INFO,commons.dao.PreparedStatementEx,executeQuery        ,PreparedStatement.executeQuery() id=189369c1  params=[STRING:1:0000][STRING:2:0018][STRING:3:…]
@@ -11,9 +12,19 @@ SQL text with `?` placeholders) and once on execute (carries the bound
 parameters in `[TYPE:N:value]` format). The two are correlated by the
 `id=<HEX>` token on both lines.
 
-Nearby `InvokeDao` lines record the FQCN that owns the statement, e.g.
-`Dao<garbled>jp.co.vinculumjapan.mdware.shiire.dao.impl.PdaDataSelectDao`.
-We extract that as a hint for the user; failure to find it is non-fatal.
+Three other line kinds are exploited to enrich the data:
+
+* `commons.struts.RequestProcessor,callMethod` — marks the start of a
+  user-facing request, e.g. `PdaHonbuIdoShijiTorikomiAction#search`. We
+  group every prepared statement under the most-recent callMethod so the
+  UI can show "this user click ran these 5 queries".
+* `commons.dao.AbstractDaoInvoker,InvokeDao` — names the DAO class
+  (`jp.co.…shiire.dao.impl.PdaDataSelectDao`). The package path is the
+  primary signal/noise discriminator: domain packages
+  (`mdware.<domain>.*`) are signal, framework ones (`swc.commons.*`,
+  `mdware.common.*`) are noise.
+* `initSession` / `endSession` — used as a fallback transaction marker
+  when no `callMethod` line precedes a statement (background jobs).
 
 Public API
 ----------
@@ -21,13 +32,22 @@ Public API
 * format_param(typ, value)     → SQL literal string
 * count_placeholders(sql)      → int  (skips `?` inside string literals)
 * combine_sql_params(sql, ps)  → str  (substitutes positional placeholders)
-* find_entry_by_id(text, id)   → dict | None
-* find_last_entry(text)        → dict | None
+* parse_log(text)              → list[Statement]      ← the new "scan everything" entry point
+* group_by_action(stmts)       → list[Action]         ← list grouped under user requests
+* score_statement(stmt, …)     → int                  ← higher = more likely a primary business query
+* extract_statement_type(sql)  → "SELECT" / "INSERT" / …
+* extract_target_tables(sql)   → list[str]            ← short list, max 4
+* find_entry_by_id(text, id)   → dict | None          ← thin wrapper over parse_log (back-compat)
+* find_last_entry(text)        → dict | None          ← thin wrapper over parse_log (back-compat)
+
+Constants:
+* DEFAULT_NOISE_PACKAGES, DEFAULT_NOISE_TABLES, DEFAULT_PRIMARY_THRESHOLD
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Iterable
 
 # ── Regex constants ───────────────────────────────────────────────────────────
@@ -64,6 +84,135 @@ _FQCN_RE = re.compile(r"\b((?:[a-zA-Z_]\w*\.){2,}[A-Za-z_]\w*)\b")
 # Recognise a SQL string literal (single quotes, with `''` as escape) so we
 # don't substitute placeholders found inside one.
 _STRING_LITERAL_RE = re.compile(r"'(?:''|[^'])*'")
+
+# Front of every log line: `YYYY-MM-DD HH:MM:SS,LEVEL,LOGGER,METHOD,…`. We
+# only need the timestamp; the rest is matched generically below.
+_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+# `commons.struts.RequestProcessor,callMethod` — start of a user request.
+# Captures the action label, e.g. `PdaHonbuIdoShijiTorikomiAction#search`.
+_CALL_METHOD_RE = re.compile(
+    r"RequestProcessor\s*,\s*callMethod\s*,\s*"
+    r"(?:[A-Za-z_][\w$]*\.)*([A-Za-z_][\w$]*#[A-Za-z_][\w$]*)"
+)
+# `commons.dao.ServletDaoInvoker,initSession` / `endSession` — fallback
+# transaction markers when there's no callMethod (e.g. background jobs).
+_INIT_SESSION_RE = re.compile(r"ServletDaoInvoker\s*,\s*initSession")
+_END_SESSION_RE  = re.compile(r"ServletDaoInvoker\s*,\s*endSession")
+
+# Pull SELECT/INSERT/UPDATE/DELETE/MERGE/WITH off the front of a SQL.
+_STMT_TYPE_RE = re.compile(
+    r"\s*(?:--[^\n]*\n|/\*.*?\*/|\s)*"
+    r"\b(WITH|SELECT|INSERT|UPDATE|DELETE|MERGE|TRUNCATE|CREATE|ALTER|DROP)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Crude but effective table extractor — first identifier after FROM / INTO /
+# UPDATE / JOIN / TABLE keywords. Skips `(` (subqueries / derived tables) and
+# common generic aliases like `TMP_TBL` / `MAIN`.
+_TABLE_AFTER_RE = re.compile(
+    r"\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+(?:\w+\.)?([A-Z_][A-Z0-9_]{1,})",
+    re.IGNORECASE,
+)
+_GENERIC_ALIAS = {"TMP_TBL", "MAIN", "DUAL", "TBL_1", "TBL_2", "TBL_3",
+                  "TBL_4", "TBL_5", "T", "A", "B", "C", "X", "Y"}
+
+
+# ── Default scoring tables ────────────────────────────────────────────────────
+# Substrings that, if present in a DAO's package path, mark the statement as
+# infrastructure (config reads, audit logging, message lookup, etc.).
+DEFAULT_NOISE_PACKAGES = ("swc.commons", "mdware.common")
+
+# Tables whose statements are almost always cross-cutting concerns rather
+# than a primary business query. Hits subtract from the score.
+DEFAULT_NOISE_TABLES = (
+    "SYSTEM_CONTROL", "DT_TABLE_LOG", "R_MESSAGE",
+    "R_DICTIONARY_CONTROL", "R_NAMECTF",
+)
+
+# A statement scoring at or above this threshold gets the ★ primary tag and
+# is the only kind shown when "Hide infrastructure" is on.
+DEFAULT_PRIMARY_THRESHOLD = 30
+
+
+# ── Statement / Action data classes ───────────────────────────────────────────
+@dataclass
+class Statement:
+    """One prepared statement extracted from the log.
+
+    `score` is filled by `score_statement(...)` and depends on the user's
+    project-specific noise/primary lists; raw parsers leave it at 0."""
+    id:         str = ""
+    timestamp:  str = ""             # "YYYY-MM-DD HH:MM:SS"
+    sql:        str = ""             # raw, with `?` placeholders
+    params_raw: str = ""             # `[STRING:1:…][STRING:2:…]`
+    params:     list[tuple[str, str]] = field(default_factory=list)
+    fqcn:       str | None = None    # full DAO class name
+    action:     str | None = None    # callMethod label, e.g. `…#search`
+    op:         str = ""             # "executeQuery" or "executeUpdate"
+    init_line:  int = 0              # line number of the <init> log line
+    exec_line:  int = 0              # line number of the execute log line
+    score:      int = 0              # primary-vs-noise score
+
+    # Lazily-computed views; cheap, but nice to compute once and cache.
+    _stmt_type: str | None = None
+    _tables:    list[str] | None = None
+
+    @property
+    def statement_type(self) -> str:
+        if self._stmt_type is None:
+            self._stmt_type = extract_statement_type(self.sql)
+        return self._stmt_type
+
+    @property
+    def target_tables(self) -> list[str]:
+        if self._tables is None:
+            self._tables = extract_target_tables(self.sql)
+        return self._tables
+
+    @property
+    def dao_short(self) -> str:
+        """Last segment of the FQCN — what's useful in a list view."""
+        if not self.fqcn:
+            return ""
+        return self.fqcn.rsplit(".", 1)[-1]
+
+    @property
+    def is_primary(self) -> bool:
+        return self.score >= DEFAULT_PRIMARY_THRESHOLD
+
+    def combined_sql(self) -> str:
+        """SQL with `?` placeholders substituted using `params`."""
+        return combine_sql_params(self.sql, self.params)
+
+    # Back-compat shim: the old find_entry_by_id() returned a dict; some
+    # callers (and tests) expect dict-style access. Make it walk talk like one.
+    def as_dict(self) -> dict:
+        return {
+            "id":         self.id,
+            "timestamp":  self.timestamp,
+            "sql":        self.sql,
+            "params_raw": self.params_raw,
+            "params":     self.params,
+            "fqcn":       self.fqcn,
+            "action":     self.action,
+            "op":         self.op,
+            "score":      self.score,
+            "result":     self.combined_sql(),
+        }
+
+
+@dataclass
+class Action:
+    """A user-facing request grouping one or more Statements.
+
+    `label` is the callMethod hint (e.g. `…#search`) when available, or
+    a synthetic fallback like `Session @ 11:09:36` when only an
+    init/endSession marker was seen, or `Detached statements` for
+    statements with no preceding marker at all."""
+    label:      str
+    timestamp:  str = ""
+    statements: list[Statement] = field(default_factory=list)
 
 
 # ── Param parsing ─────────────────────────────────────────────────────────────
@@ -193,103 +342,345 @@ def combine_sql_params(sql: str, params: list[tuple[str, str]]) -> str:
     return "".join(out)
 
 
-# ── Log scanning ──────────────────────────────────────────────────────────────
-def find_entry_by_id(log_text: str, query_id: str) -> dict | None:
-    """Scan `log_text` for the SQL/params/class belonging to `query_id`.
+# ── SQL shape helpers (statement type / target tables) ───────────────────────
+def extract_statement_type(sql: str) -> str:
+    """Return the leading verb of a SQL — `SELECT`, `INSERT`, `UPDATE`,
+    `DELETE`, `MERGE`, `WITH`, `TRUNCATE`, `CREATE`, `ALTER`, `DROP`.
 
-    Returns a dict on success:
-        {
-          "id":        "189369c1",
-          "sql":       "WITH TMP_TBL AS …",
-          "params_raw":"[STRING:1:0000]…",
-          "params":    [("STRING", "0000"), …],
-          "fqcn":      "jp.co.vinculumjapan.mdware…PdaDataSelectDao" | None,
-          "result":    "WITH TMP_TBL AS ( SELECT '0000' …)",
-        }
-    Returns None when the id isn't found.
-    """
+    Falls back to `""` for empty SQL or `"SQL"` if the input doesn't start
+    with one of the recognised verbs (e.g. some stored-procedure call)."""
+    if not sql:
+        return ""
+    m = _STMT_TYPE_RE.match(sql)
+    if not m:
+        return "SQL"
+    return m.group(1).upper()
+
+
+def extract_target_tables(sql: str, max_n: int = 4) -> list[str]:
+    """Return up to `max_n` distinct, real-looking target tables from the
+    SQL — first ones following FROM/INTO/UPDATE/JOIN.
+
+    Generic aliases and one-letter names (TMP_TBL, MAIN, T, X…) are
+    filtered out; the order is preserved (so the FROM table appears
+    first, then the joined ones). De-duplicated."""
+    if not sql:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    masked = _mask_string_literals(sql)
+    for m in _TABLE_AFTER_RE.finditer(masked):
+        name = m.group(1).upper()
+        if name in _GENERIC_ALIAS or len(name) <= 2:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= max_n:
+            break
+    return out
+
+
+# ── Scoring (primary vs infrastructure) ───────────────────────────────────────
+def score_statement(
+    stmt: Statement,
+    *,
+    primary_packages: Iterable[str] = (),
+    noise_packages: Iterable[str] = DEFAULT_NOISE_PACKAGES,
+    noise_tables: Iterable[str] = DEFAULT_NOISE_TABLES,
+) -> int:
+    """Heuristic score: higher = more likely a primary business query.
+
+    The defaults work well for the sample stclibApp.log:
+      * `swc.commons.*` and `mdware.common.*` packages → infrastructure
+      * `SYSTEM_CONTROL / DT_TABLE_LOG / R_MESSAGE / R_DICTIONARY_CONTROL
+        / R_NAMECTF` tables → infrastructure
+      * `WITH` / `JOIN` and longer SQL → primary signal
+      * Many bound params → primary signal (real user input)
+
+    `primary_packages` is opt-in: when set, statements whose DAO is in one
+    of those packages get a strong positive bonus. Empty list means
+    "everything not in noise_packages is potentially primary"."""
+    score = 0
+    fqcn = stmt.fqcn or ""
+    sql = stmt.sql or ""
+
+    # Package signal — explicit primary list wins outright.
+    is_noise_pkg = bool(noise_packages and any(p in fqcn for p in noise_packages))
+    if primary_packages and any(p in fqcn for p in primary_packages):
+        score += 50
+    if is_noise_pkg:
+        score -= 80
+    elif fqcn:
+        # Baseline bonus: DAO is known and not in any noise package, so
+        # it's at least a domain class. Without this, short domain SELECTs
+        # like `TenpoSelectDao` sit just below the primary threshold.
+        score += 10
+
+    # SQL complexity.
+    n = len(sql)
+    if n > 500:
+        score += 20
+    if n > 1500:
+        score += 10
+    if n < 200:
+        score -= 10
+
+    # Joins, CTEs, unions — hallmarks of business queries.
+    upper = sql.upper()
+    if " JOIN " in upper or "\nJOIN" in upper:
+        score += 15
+    if upper.lstrip().startswith("WITH"):
+        score += 15
+    if " UNION " in upper or " UNION ALL " in upper:
+        score += 10
+
+    # Param count — more params means more user input being threaded
+    # through. Capped so a 50-bind logging insert doesn't dominate.
+    n_params = len(stmt.params)
+    score += min(n_params, 6) * 3   # capped at +18
+
+    # Target-table noise.
+    for tbl in stmt.target_tables:
+        if tbl in noise_tables:
+            score -= 40
+            break  # one infrastructure target is enough to mark it
+
+    # Single-param config lookups — `SELECT … WHERE PARAMETER_ID = ?`.
+    if n_params == 1 and n < 300:
+        score -= 15
+
+    return score
+
+
+# ── Full-log parser ──────────────────────────────────────────────────────────
+def parse_log(log_text: str) -> list[Statement]:
+    """Walk `log_text` once and return every prepared statement found.
+
+    Pairs init/execute lines by `id`. A statement appears in the result
+    even if only one of the two lines was logged (e.g. a query that errored
+    before execute) — the missing side stays empty so the UI can flag it.
+
+    Statements are returned in the order their *init* line appeared. Each
+    statement also carries the most-recent `callMethod` action label and
+    the most-recent InvokeDao FQCN observed before its init line, which
+    lets the UI group by user request and label by DAO."""
+    if not log_text:
+        return []
+    by_id: dict[str, Statement] = {}
+    order: list[str] = []
+    last_fqcn: str | None = None
+    last_action: str | None = None
+    last_session_ts: str | None = None
+    # Recorded as we go so we can fill in missing FQCNs in a second pass —
+    # some logs (e.g. files that start mid-session) have an init line BEFORE
+    # the first InvokeDao, so the running last_fqcn is still None.
+    invoke_records: list[tuple[int, str]] = []  # (lineno, fqcn)
+
+    for lineno, line in enumerate(log_text.splitlines(), start=1):
+        # Track DAO / action / session context — these prime the next
+        # statement's metadata.
+        if "InvokeDao" in line:
+            f = _extract_fqcn(line)
+            if f:
+                last_fqcn = f
+                invoke_records.append((lineno, f))
+            continue
+        cm = _CALL_METHOD_RE.search(line)
+        if cm:
+            last_action = cm.group(1)
+            continue
+        if _INIT_SESSION_RE.search(line):
+            ts = _extract_timestamp(line)
+            last_session_ts = ts or last_session_ts
+            continue
+        if _END_SESSION_RE.search(line):
+            # Closing a session may signal the end of a callMethod block;
+            # we don't reset last_action immediately (some logs interleave
+            # session boundaries) — see group_by_action for the truth.
+            continue
+
+        # Init line: SQL with `?` placeholders.
+        m = _INIT_LINE_RE.search(line)
+        if m:
+            qid = m.group(1).lower()
+            sql = m.group(2).strip()
+            stmt = by_id.get(qid)
+            if stmt is None:
+                stmt = Statement(id=qid)
+                by_id[qid] = stmt
+                order.append(qid)
+            stmt.sql = sql
+            stmt.fqcn = stmt.fqcn or last_fqcn
+            stmt.action = stmt.action or last_action
+            stmt.timestamp = stmt.timestamp or _extract_timestamp(line) or last_session_ts or ""
+            stmt.init_line = lineno
+            continue
+
+        # Exec line: bound params. May arrive before init in pathological
+        # logs but we still pair them.
+        m = _EXEC_LINE_RE.search(line)
+        if m:
+            qid = m.group(1).lower()
+            stmt = by_id.get(qid)
+            if stmt is None:
+                stmt = Statement(id=qid)
+                by_id[qid] = stmt
+                order.append(qid)
+            stmt.params_raw = m.group(2).strip()
+            stmt.params = parse_params(stmt.params_raw)
+            stmt.exec_line = lineno
+            stmt.op = "executeUpdate" if "execteUpdate" in line or "executeUpdate" in line else "executeQuery"
+            stmt.fqcn = stmt.fqcn or last_fqcn
+            stmt.action = stmt.action or last_action
+            if not stmt.timestamp:
+                stmt.timestamp = _extract_timestamp(line) or ""
+
+    # ── Pass 2: fill in missing FQCNs from the closest InvokeDao record.
+    # When a statement has no fqcn, look at the InvokeDao records on either
+    # side of its init/exec lines and pick the nearest within a small window.
+    if invoke_records:
+        inv_lines = [r[0] for r in invoke_records]
+        for stmt in by_id.values():
+            if stmt.fqcn:
+                continue
+            anchor = stmt.init_line or stmt.exec_line
+            if not anchor:
+                continue
+            # Binary-search-ish: find the nearest InvokeDao record by line.
+            best = None
+            best_dist = 1 << 30
+            for ln, fq in invoke_records:
+                d = abs(ln - anchor)
+                if d < best_dist:
+                    best_dist = d
+                    best = fq
+            # Cap at a reasonable window — unrelated InvokeDaos far away
+            # shouldn't bleed in.
+            if best and best_dist <= 30:
+                stmt.fqcn = best
+
+    return [by_id[qid] for qid in order]
+
+
+def annotate_scores(
+    statements: list[Statement],
+    *,
+    primary_packages: Iterable[str] = (),
+    noise_packages: Iterable[str] = DEFAULT_NOISE_PACKAGES,
+    noise_tables: Iterable[str] = DEFAULT_NOISE_TABLES,
+) -> None:
+    """Compute and store `.score` on each statement in place."""
+    pp = tuple(primary_packages)
+    np = tuple(noise_packages)
+    nt = tuple(noise_tables)
+    for s in statements:
+        s.score = score_statement(
+            s, primary_packages=pp, noise_packages=np, noise_tables=nt,
+        )
+
+
+def group_by_action(
+    statements: list[Statement],
+    *,
+    fallback_gap_seconds: int = 1,
+) -> list[Action]:
+    """Group statements under the user request that triggered them.
+
+    Strategy, in order of preference:
+      1. Statements sharing a non-None `action` (callMethod label) and
+         a contiguous timestamp window are placed under that action.
+      2. Statements with no action label fall into a synthetic
+         `Session @ HH:MM:SS` group keyed on a 1-second gap from the
+         previous statement (`fallback_gap_seconds`).
+
+    The result is in execution order; each Action's `statements` list
+    preserves init-order from `parse_log`."""
+    actions: list[Action] = []
+    current: Action | None = None
+    last_ts_secs: int | None = None
+    last_action_label: str | None = None
+    for s in statements:
+        ts_secs = _ts_to_seconds(s.timestamp)
+        # New explicit action label → start a new group.
+        if s.action and s.action != last_action_label:
+            current = Action(label=s.action, timestamp=s.timestamp)
+            actions.append(current)
+            last_action_label = s.action
+        # Same action label → keep appending.
+        elif s.action and s.action == last_action_label and current is not None:
+            pass
+        # No action label → fall back to time-gap grouping.
+        else:
+            need_new = (
+                current is None
+                or last_ts_secs is None
+                or ts_secs is None
+                or (ts_secs - last_ts_secs) > fallback_gap_seconds
+            )
+            if need_new:
+                label = (
+                    f"Session @ {s.timestamp[-8:]}"
+                    if s.timestamp else "Detached statements"
+                )
+                current = Action(label=label, timestamp=s.timestamp)
+                actions.append(current)
+                last_action_label = None
+        current.statements.append(s)
+        last_ts_secs = ts_secs if ts_secs is not None else last_ts_secs
+    return actions
+
+
+# ── Back-compat wrappers ─────────────────────────────────────────────────────
+def find_entry_by_id(log_text: str, query_id: str) -> dict | None:
+    """Locate a single statement by its hex id and return the legacy dict
+    shape kept for test/back-compat code. Internally now uses parse_log."""
     if not query_id or not log_text:
         return None
     target = query_id.strip().lower()
-    sql_text: str | None = None
-    params_raw: str | None = None
-    fqcn: str | None = None
-    last_fqcn: str | None = None  # most recent InvokeDao FQCN we've seen
-
-    # Single linear pass — log files run to many MB; load as string is OK
-    # for typical sizes (the sample is 50 KB; even 50 MB fits in memory).
-    for line in log_text.splitlines():
-        # Track the running FQCN so we can pin down the dao for this id.
-        if "InvokeDao" in line:
-            last_fqcn = _extract_fqcn(line) or last_fqcn
-
-        m = _INIT_LINE_RE.search(line)
-        if m and m.group(1).lower() == target:
-            sql_text = m.group(2).strip()
-            fqcn = last_fqcn
-            continue
-        m = _EXEC_LINE_RE.search(line)
-        if m and m.group(1).lower() == target:
-            params_raw = m.group(2).strip()
-            # SQL might already have been captured; we can stop scanning.
-            if sql_text is not None:
-                break
-    if sql_text is None and params_raw is None:
-        return None
-    params = parse_params(params_raw or "")
-    result = combine_sql_params(sql_text or "", params)
-    return {
-        "id":         target,
-        "sql":        sql_text or "",
-        "params_raw": params_raw or "",
-        "params":     params,
-        "fqcn":       fqcn,
-        "result":     result,
-    }
+    for stmt in parse_log(log_text):
+        if stmt.id == target:
+            return stmt.as_dict() | {"result": stmt.combined_sql()}
+    return None
 
 
 def find_last_entry(log_text: str) -> dict | None:
-    """Find the most recent prepared-statement entry that has BOTH an
-    init line (SQL) and an execute line (params). Used by the dialog's
-    'Get last SQL' button.
-
-    Walks the log forwards keeping a per-id pair as we accumulate; the
-    last pair to be completed (i.e. its execute line is the latest such
-    line in the file) is returned."""
+    """Return the most recent statement that has BOTH an init and an
+    execute line. Legacy dict shape; parse_log under the hood."""
     if not log_text:
         return None
-    by_id: dict[str, dict] = {}
-    last_complete_id: str | None = None
-    last_fqcn: str | None = None
-    for line in log_text.splitlines():
-        if "InvokeDao" in line:
-            last_fqcn = _extract_fqcn(line) or last_fqcn
-        m = _INIT_LINE_RE.search(line)
-        if m:
-            qid = m.group(1).lower()
-            entry = by_id.setdefault(qid, {})
-            entry["sql"] = m.group(2).strip()
-            entry["fqcn"] = entry.get("fqcn") or last_fqcn
-            continue
-        m = _EXEC_LINE_RE.search(line)
-        if m:
-            qid = m.group(1).lower()
-            entry = by_id.setdefault(qid, {})
-            entry["params_raw"] = m.group(2).strip()
-            if "sql" in entry:
-                last_complete_id = qid
-    if not last_complete_id:
+    last: Statement | None = None
+    for stmt in parse_log(log_text):
+        if stmt.sql and stmt.params_raw:
+            last = stmt
+    if last is None:
         return None
-    e = by_id[last_complete_id]
-    params = parse_params(e.get("params_raw", ""))
-    return {
-        "id":         last_complete_id,
-        "sql":        e.get("sql", ""),
-        "params_raw": e.get("params_raw", ""),
-        "params":     params,
-        "fqcn":       e.get("fqcn"),
-        "result":     combine_sql_params(e.get("sql", ""), params),
-    }
+    return last.as_dict() | {"result": last.combined_sql()}
+
+
+# ── Internal scratch helpers ─────────────────────────────────────────────────
+def _extract_timestamp(line: str) -> str | None:
+    m = _TIMESTAMP_RE.match(line)
+    return m.group(1) if m else None
+
+
+def _ts_to_seconds(ts: str) -> int | None:
+    """Convert `YYYY-MM-DD HH:MM:SS` to wall-clock seconds-since-epoch-ish.
+    We don't need calendar accuracy — only a monotonic comparison within a
+    log file. Days are counted as 86400 seconds, which is good enough for
+    grouping statements within the same day or across a midnight rollover."""
+    if not ts or len(ts) < 19:
+        return None
+    try:
+        # YYYY-MM-DD HH:MM:SS
+        y, mo, d = int(ts[0:4]), int(ts[5:7]), int(ts[8:10])
+        h, mi, s = int(ts[11:13]), int(ts[14:16]), int(ts[17:19])
+    except ValueError:
+        return None
+    # Approximate — "month*31" introduces a few-day jitter at month
+    # boundaries, but we only compare within the same file/day so it's fine.
+    return (((y * 12 + mo) * 31 + d) * 24 + h) * 3600 + mi * 60 + s
 
 
 def _extract_fqcn(invoke_dao_line: str) -> str | None:

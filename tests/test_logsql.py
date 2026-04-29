@@ -9,12 +9,21 @@ from pathlib import Path
 import pytest
 
 from translator_app.logsql import (
+    DEFAULT_NOISE_PACKAGES,
+    DEFAULT_NOISE_TABLES,
+    Statement,
+    annotate_scores,
     combine_sql_params,
     count_placeholders,
+    extract_statement_type,
+    extract_target_tables,
     find_entry_by_id,
     find_last_entry,
     format_param,
+    group_by_action,
+    parse_log,
     parse_params,
+    score_statement,
 )
 
 
@@ -222,3 +231,183 @@ def test_real_log_extracts_known_query_id():
     # the <init> line.
     assert e["fqcn"] is not None
     assert "PdaDataSelectDao" in e["fqcn"]
+
+
+# ── extract_statement_type / extract_target_tables ────────────────────────────
+def test_extract_statement_type_recognises_common_verbs():
+    assert extract_statement_type("SELECT 1 FROM T") == "SELECT"
+    assert extract_statement_type("  /* comment */ INSERT INTO T VALUES (1)") == "INSERT"
+    assert extract_statement_type("UPDATE T SET A = 1") == "UPDATE"
+    assert extract_statement_type("DELETE FROM T WHERE A = 1") == "DELETE"
+    assert extract_statement_type("WITH X AS (SELECT 1) SELECT * FROM X") == "WITH"
+    assert extract_statement_type("MERGE INTO T USING S ON …") == "MERGE"
+    assert extract_statement_type("") == ""
+    assert extract_statement_type("CALL my_proc()") == "SQL"
+
+
+def test_extract_target_tables_skips_aliases_and_dedupes():
+    sql = "SELECT * FROM R_TENPO T1 LEFT JOIN R_SYOHIN T2 ON T1.X = T2.Y"
+    assert extract_target_tables(sql) == ["R_TENPO", "R_SYOHIN"]
+
+
+def test_extract_target_tables_filters_generic_aliases():
+    # TMP_TBL / MAIN are the generic aliases used in the sample SQL —
+    # they shouldn't pollute the displayed table list.
+    sql = "WITH TMP_TBL AS (SELECT 1) SELECT * FROM TMP_TBL JOIN R_HANBAI_SYOHIN HS"
+    out = extract_target_tables(sql)
+    assert "TMP_TBL" not in out
+    assert "R_HANBAI_SYOHIN" in out
+
+
+def test_extract_target_tables_caps_at_max_n():
+    sql = "SELECT * FROM A1234 JOIN B1234 JOIN C1234 JOIN D1234 JOIN E1234"
+    assert len(extract_target_tables(sql, max_n=3)) == 3
+
+
+# ── score_statement ───────────────────────────────────────────────────────────
+def _make_stmt(**overrides):
+    s = Statement(id="x", sql=overrides.pop("sql", "SELECT 1 FROM T WHERE A = ?"))
+    for k, v in overrides.items():
+        setattr(s, k, v)
+    return s
+
+
+def test_score_statement_penalises_noise_package():
+    s = _make_stmt(fqcn="jp.co.x.swc.commons.resorces.SystemPropertieDao",
+                   params=[("STRING", "x")])
+    assert score_statement(s, noise_packages=DEFAULT_NOISE_PACKAGES) < 0
+
+
+def test_score_statement_rewards_explicit_primary_package():
+    sql = "WITH TMP AS (SELECT 1) " + ("SELECT * FROM R_HANBAI_SYOHIN " * 30)
+    s = _make_stmt(
+        fqcn="jp.co.x.mdware.shiire.dao.impl.PdaDataSelectDao",
+        sql=sql,
+        params=[("STRING", str(i)) for i in range(9)],
+    )
+    score = score_statement(
+        s,
+        primary_packages=["mdware.shiire"],
+        noise_packages=DEFAULT_NOISE_PACKAGES,
+    )
+    assert score >= 50, f"expected primary score, got {score}"
+
+
+def test_score_statement_baseline_bonus_for_known_non_noise_dao():
+    """Domain DAOs with no explicit primary list still cross the
+    threshold for typical real queries (700+ chars). The +10 baseline
+    bonus is the difference between a domain DAO and an unknown one;
+    paired with the >500-char length bonus it lands TenpoSelectDao-style
+    queries above DEFAULT_PRIMARY_THRESHOLD = 30."""
+    # Realistic-length SQL — the actual TenpoSelectDao query in the
+    # bundled stclibApp.log is ~933 chars; we mirror that to trigger the
+    # >500 length bonus (which is what gets it across the threshold).
+    sql = (
+        "SELECT TENPO_CD, YUKO_DT, DELETE_FG, TENPOKAISO1_CD, TENPOKAISO2_CD, "
+        "TENPOKAISO3_CD, KANJI_NA, KANA_NA, KANJI_RN, KANA_RN, TENPO_KB, "
+        "KAITEN_DT, HEITEN_DT, ZAIMU_END_DT, HOJIN_CD, OPEN_DT, HOJIN_NA, "
+        "TENPO_TYPE_KB, ENRYO_NB, AREA_NB, ZIPCODE_NA, JUSHO_KANJI_NA, "
+        "JUSHO_KANA_NA, TEL_NB, FAX_NB, FAX_OUT_NB, EIGYO_KAISHI_DT, "
+        "EIGYO_TERMINATE_DT, REGISTRATION_DT, UPDATE_DT, INSERT_DT "
+        "FROM R_TENPO WHERE TENPO_CD = ? AND YUKO_DT BETWEEN ? AND ? "
+        "AND DELETE_FG = '0' AND TENPO_KB IN ('1', '4') "
+        "ORDER BY TENPO_CD, YUKO_DT DESC"
+    )
+    assert len(sql) > 500  # sanity: triggers the >500-char length bonus
+    s = _make_stmt(
+        fqcn="jp.co.x.mdware.shiire.dao.impl.TenpoSelectDao",
+        sql=sql,
+        params=[("STRING", "1"), ("STRING", "2"), ("STRING", "3")],
+    )
+    score = score_statement(s)
+    assert score >= 30, f"expected primary, got {score}"
+
+
+def test_score_statement_short_unknown_dao_below_threshold():
+    """A short SELECT with no DAO context shouldn't accidentally rank
+    primary — that would let random noise leak through."""
+    s = _make_stmt(sql="SELECT 1 FROM T WHERE A = ?", params=[("STRING", "x")])
+    assert score_statement(s) < 30
+
+
+def test_score_statement_demotes_infra_table_targets():
+    s = _make_stmt(
+        fqcn="jp.co.x.mdware.shiire.dao.impl.WeirdDao",
+        sql="INSERT INTO DT_TABLE_LOG (X, Y, Z) VALUES (?, ?, ?)",
+        params=[("STRING", "a"), ("STRING", "b"), ("STRING", "c")],
+    )
+    s._tables = None
+    s._stmt_type = None
+    score = score_statement(s, noise_tables=DEFAULT_NOISE_TABLES)
+    # Even though the DAO is not in noise_packages, the target table
+    # alone (DT_TABLE_LOG) makes this infrastructure.
+    assert score < 30, f"expected non-primary, got {score}"
+
+
+# ── parse_log + group_by_action ───────────────────────────────────────────────
+@pytest.mark.skipif(not SAMPLE_LOG.exists(), reason="sample log not present")
+def test_parse_log_finds_all_statements_in_real_log():
+    from translator_app.logsql import read_log_file
+    text = read_log_file(str(SAMPLE_LOG))
+    stmts = parse_log(text)
+    # Sample log has 13 prepared statements (verified manually).
+    assert len(stmts) == 13
+    # Every statement got an FQCN — including the very first one whose
+    # InvokeDao line appears AFTER the init line (the 2-pass FQCN fill
+    # is what makes that work).
+    assert all(s.fqcn for s in stmts), [s.id for s in stmts if not s.fqcn]
+    # The big WITH TMP_TBL query should be marked primary after scoring.
+    annotate_scores(stmts)
+    assert any(
+        s.is_primary and "PdaDataSelectDao" in (s.fqcn or "")
+        for s in stmts
+    )
+
+
+@pytest.mark.skipif(not SAMPLE_LOG.exists(), reason="sample log not present")
+def test_group_by_action_uses_call_method_labels():
+    from translator_app.logsql import read_log_file
+    text = read_log_file(str(SAMPLE_LOG))
+    stmts = parse_log(text)
+    actions = group_by_action(stmts)
+    labels = [a.label for a in actions]
+    # Both #search and #upd actions should be detected as labelled groups.
+    assert any("#search" in l for l in labels)
+    assert any("#upd" in l for l in labels)
+
+
+def test_group_by_action_falls_back_to_time_gap_for_orphans():
+    """Statements with no callMethod marker get bucketed by 1-second
+    time gaps so an orphan statement at file start still has a home."""
+    s1 = Statement(id="aaa", timestamp="2026-01-01 00:00:00",
+                   sql="SELECT 1", fqcn="jp.co.x.foo.Dao", action=None)
+    s2 = Statement(id="bbb", timestamp="2026-01-01 00:00:00",
+                   sql="SELECT 2", fqcn="jp.co.x.foo.Dao", action=None)
+    s3 = Statement(id="ccc", timestamp="2026-01-01 00:00:30",
+                   sql="SELECT 3", fqcn="jp.co.x.foo.Dao", action=None)
+    actions = group_by_action([s1, s2, s3])
+    # First two are within 1s → same group; third is 30s later → new group.
+    assert len(actions) == 2
+    assert len(actions[0].statements) == 2
+    assert len(actions[1].statements) == 1
+
+
+def test_group_by_action_keeps_init_order_within_a_group():
+    s1 = Statement(id="aaa", timestamp="2026-01-01 00:00:00",
+                   sql="SELECT 1", action="Foo#bar")
+    s2 = Statement(id="bbb", timestamp="2026-01-01 00:00:00",
+                   sql="SELECT 2", action="Foo#bar")
+    actions = group_by_action([s1, s2])
+    assert len(actions) == 1
+    assert [s.id for s in actions[0].statements] == ["aaa", "bbb"]
+
+
+# ── back-compat: old find_entry_by_id shape still works ─────────────────────
+def test_find_entry_by_id_back_compat_dict_shape():
+    """The dict shape old callers expect: {id, sql, params_raw, params,
+    fqcn, result}. Now produced by parse_log + Statement.as_dict, but the
+    public contract must be unchanged."""
+    e = find_entry_by_id(_FAKE_LOG, "abcd1234")
+    assert e is not None
+    for k in ("id", "sql", "params_raw", "params", "fqcn", "result"):
+        assert k in e, f"missing key: {k}"

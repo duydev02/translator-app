@@ -159,33 +159,75 @@ aren't part of the translation pipeline. Currently:
 ### Extract SQL from log… (`Ctrl+Shift+L`)
 
 Reads a `stclibApp.log` produced by `commons.dao.PreparedStatementEx`,
-finds an entry by its `id=<HEX>` token, and substitutes the `?`
-placeholders in the SQL with the bound parameters — giving you a
-runnable, fully-formed SQL.
+parses **every** prepared statement it contains, surfaces the 1–2
+*primary* business queries above the dozens of infrastructure calls
+(SystemControl reads, audit-log inserts, message lookups…), and
+substitutes `?` placeholders with the bound parameters to give you a
+runnable SQL.
 
-- **Log file**: pick any `*.log` or paste a path. The last-used path is
-  remembered across runs.
-- **Query ID**: the `id=` value you saw in the log (e.g. `189369c1`).
-- **Using log** (default ON): Process pulls the SQL + params from the
-  file. Toggle OFF to paste SQL and `[STRING:1:…][STRING:2:…]` blob
-  directly — useful when you've copied them from somewhere else.
-- **Get last SQL**: scans the file for the most recent `<init>`/execute
-  pair (the latest fully-bound prepared statement) and loads it.
-- **Process** (`Enter` in the ID field also triggers): runs the
-  combiner. Counts shown below: `SQL length`, `[?] count`, `Params
-  count`. Mismatched counts get a yellow notice.
-- **Result actions**:
-  - **Copy result**: clipboard, ready to paste into your DB tool.
-  - **Send to translator input**: replaces the active doc tab's input
-    with the runnable SQL and re-runs translation immediately, so
-    Inline Replace or Design Doc renders the Japanese names against
-    real values.
+#### Browsing a log
 
-Param types recognised by the formatter: `STRING` / `CHAR` / `VARCHAR`
-/ `CLOB` (single-quoted with `''` escaping); `INT` / `BIGINT` /
-`DECIMAL` / `DOUBLE` / `FLOAT` (bare); `DATE` / `TIMESTAMP` / `TIME`
-(quoted); `NULL` (keyword); `BOOLEAN` (1/0); `BYTES` / `BLOB` (hex).
-Unknown types fall back to single-quoted strings.
+- **Log dropdown**: pick from your most recent paths, or **Browse…**
+  to add a new one. Up to 8 paths are kept so you can hop between e.g.
+  `lawmasterhansoku-web` and `lawdailyorder-web` instantly. **Reload**
+  re-reads the file (useful after a server run produces new entries).
+- The **statement list** is grouped under the user request that
+  triggered each batch — you'll see something like
+  *`PdaHonbuIdoShijiTorikomiAction#search  (9 queries · 3 ★)`*. The
+  grouping uses `commons.struts.RequestProcessor,callMethod` markers
+  when present, falling back to 1-second time gaps for orphan
+  statements.
+- Statements are tagged **★ primary** when their score crosses the
+  threshold (default 30). Score combines: DAO package match
+  (signal/noise lists), SQL length, `WITH` / `JOIN` / `UNION`
+  presence, bound-param count, target-table noise list.
+- **🔎 search box**: filters by id, DAO short name, statement type,
+  target tables, or substring of the SQL.
+- **☑ Hide infrastructure** (default ON): only ★-primary statements
+  show. Untick to see everything (every audit insert, every config
+  read).
+- **Click a statement** → its SQL / Params / Result tabs render below.
+  The first ★-primary statement is auto-selected after each load so
+  you usually need zero clicks.
+
+#### Defaults (per project, editable in `translator_settings.json`)
+
+- `noise_packages`: `["swc.commons", "mdware.common"]` — DAOs whose
+  package contains either of these are demoted (-80).
+- `noise_tables`: `["SYSTEM_CONTROL", "DT_TABLE_LOG", "R_MESSAGE",
+  "R_DICTIONARY_CONTROL", "R_NAMECTF"]` — statements targeting these
+  are demoted (-40).
+- `primary_packages`: empty by default. When set (e.g.
+  `["mdware.shiire", "mdware.lawmaster"]`), DAOs in those packages
+  get a strong **+50** boost — useful when you're working across
+  multiple sub-projects and want a single config to recognise them
+  all.
+- `primary_threshold`: 30. Lower it if you want more queries flagged
+  as primary; raise it for stricter filtering.
+
+#### Result actions
+
+- **Copy result**: clipboard, ready to paste into your DB tool.
+- **Send to translator input**: replaces the active doc tab's input
+  with the runnable SQL and re-runs translation immediately, so
+  Inline Replace or Design Doc renders the Japanese names against
+  real values.
+
+#### Direct mode
+
+A **Direct mode…** button swaps the body for a 3-pane view (paste SQL
+on the left, paste `[STRING:1:…]` blob in the middle, click Process to
+fill the result on the right). Useful when you don't have the log file
+handy — e.g. someone messaged you a snippet on chat. Same combiner.
+
+#### Param formatter
+
+Recognised types: `STRING` / `CHAR` / `VARCHAR` / `CLOB` (single-quoted
+with `''` escaping); `INT` / `BIGINT` / `DECIMAL` / `DOUBLE` / `FLOAT`
+(bare); `DATE` / `TIMESTAMP` / `TIME` (quoted); `NULL` (keyword);
+`BOOLEAN` (1/0); `BYTES` / `BLOB` (hex). Unknown types fall back to
+single-quoted strings. Substitution is quote-aware — `?` inside a
+string literal (e.g. `'O''Brien?'`) is left alone.
 
 ---
 
