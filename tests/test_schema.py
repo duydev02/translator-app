@@ -8,27 +8,38 @@ from translator_app.schema import (
 
 
 def test_load_index_has_expected_table_keys(sample_index):
-    table_index, column_index, _, _, _ = sample_index
+    table_index, column_index, _, _, _, _ = sample_index
     assert "R_SYOHIN" in table_index
     assert "R_TENPO" in table_index
     assert "SYOHIN_CD" in column_index
 
 
 def test_load_index_table_entry_has_logical_name(sample_index):
-    table_index, _, _, _, _ = sample_index
+    table_index, _, _, _, _, _ = sample_index
     entries = table_index["R_SYOHIN"]
     # Each entry is (schema, logical_table)
     assert any(lg == "商品マスタ" for _, lg in entries)
 
 
 def test_load_index_schemas_is_list(sample_index):
-    _, _, _, _, schemas = sample_index
+    _, _, _, _, schemas, _ = sample_index
     assert isinstance(schemas, list)
     assert "マスタ管理" in schemas
 
 
+def test_load_index_table_column_order_matches_json(sample_index):
+    """Schema Browser shows columns in JSON declaration order, so the
+    map must preserve that order — not be alpha-sorted."""
+    _, _, _, _, _, table_column_order = sample_index
+    assert "R_SYOHIN" in table_column_order
+    cols = table_column_order["R_SYOHIN"]
+    # The sample JSON declares SYOHIN_CD before BUNRUI1_CD; under A–Z this
+    # would be reversed. This guards the natural-order behaviour.
+    assert cols.index("SYOHIN_CD") < cols.index("BUNRUI1_CD")
+
+
 def test_merge_user_map_injects_override(sample_index):
-    table_index, column_index, rev_table_index, rev_column_index, _ = sample_index
+    table_index, column_index, rev_table_index, rev_column_index, _, _ = sample_index
     user_map = {"tables": {"FOO_T": "フー表"}, "columns": {"BAR_C": "バー列"}}
     merge_user_map(table_index, column_index, rev_table_index, rev_column_index, user_map)
     assert any(s == CUSTOM_SCHEMA and lg == "フー表" for s, lg in table_index["FOO_T"])

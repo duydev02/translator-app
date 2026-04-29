@@ -317,20 +317,114 @@ def open_schema_browser(app, name_filter=None):
             except Exception:
                 pass
 
-    def _add_selected_to_user_map():
+    def _override_selected_logical_name():
+        """Prompt the user for a logical-name override for the selected column
+        and save it into the User Map (translator_custom_map.json). The
+        override always wins against db_schema_output.json — useful when the
+        JSON's logical name is wrong, missing, or you want a team-specific
+        rendering. Re-runs translation on save."""
         sel = cols_tree.selection()
         if not sel:
             app._toast.show("Select a column first", 1100, "info")
             return
-        phys, logical, _other = cols_tree.item(sel[0], "values")
-        cols_map = (app._user_map.setdefault("columns", {}))
-        cols_map[phys] = logical
+        phys, current_logical, _other = cols_tree.item(sel[0], "values")
+        existing_override = (app._user_map.get("columns") or {}).get(phys, "")
+        prefill = existing_override or current_logical or ""
+
+        # Small modal prompt — prefilled, Enter saves, Esc cancels.
+        prompt = tk.Toplevel(dlg)
+        prompt.title("Override logical name")
+        prompt.configure(bg=t["bg"])
+        prompt.transient(dlg)
+        prompt.grab_set()
+        prompt.geometry("+%d+%d" % (dlg.winfo_rootx() + 80, dlg.winfo_rooty() + 80))
+
+        tk.Label(
+            prompt, text=f"Override logical name for column", font=app._ui_b,
+            bg=t["bg"], fg=t["fg"], anchor="w",
+        ).pack(fill="x", padx=14, pady=(12, 0))
+        tk.Label(
+            prompt, text=phys, font=app._mono,
+            bg=t["bg"], fg=t["accent"], anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 8))
+        hint = (
+            f"Currently: {current_logical}" if current_logical else "Currently: (no logical name)"
+        )
+        if existing_override and existing_override != current_logical:
+            hint += f"\nUser-Map override active: {existing_override}"
+        tk.Label(
+            prompt, text=hint, font=app._small,
+            bg=t["bg"], fg=t["fg_muted"], justify="left", anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 8))
+
+        var = tk.StringVar(value=prefill)
+        entry = tk.Entry(
+            prompt, textvariable=var, font=app._ui,
+            bg=t["surface"], fg=t["fg"], insertbackground=t["insert"],
+            relief="flat", bd=0, width=40,
+        )
+        entry.pack(fill="x", padx=14, pady=(0, 10), ipady=5)
+        entry.focus_set()
+        entry.select_range(0, "end")
+
         from ...config import save_user_map
-        try:
-            save_user_map(app._user_map)
-        except Exception:
-            pass
-        app._toast.show(f"Added '{phys}' → '{logical}' to User Map", 1500, "success")
+
+        def _save(_e=None):
+            new_logical = var.get().strip()
+            if not new_logical:
+                app._toast.show("Logical name can't be empty — use Remove instead", 1500, "info")
+                return
+            (app._user_map.setdefault("columns", {}))[phys] = new_logical
+            try:
+                save_user_map(app._user_map)
+            except Exception:
+                pass
+            app._toast.show(f"User Map: {phys} → {new_logical}", 1500, "success")
+            prompt.destroy()
+            # Re-run translation so the new override takes effect immediately.
+            try:
+                app.on_translate()
+            except Exception:
+                pass
+
+        def _remove():
+            cols_map = app._user_map.get("columns") or {}
+            if phys in cols_map:
+                del cols_map[phys]
+                try:
+                    save_user_map(app._user_map)
+                except Exception:
+                    pass
+                app._toast.show(f"Removed override for {phys}", 1500, "success")
+                try:
+                    app.on_translate()
+                except Exception:
+                    pass
+            prompt.destroy()
+
+        btn_row = tk.Frame(prompt, bg=t["bg"])
+        btn_row.pack(fill="x", padx=14, pady=(0, 12))
+        tk.Button(
+            btn_row, text="Save", font=app._btn, relief="flat", bd=0,
+            bg=t["accent"], fg=t["accent_fg"],
+            activebackground=t["accent"], activeforeground=t["accent_fg"],
+            padx=18, pady=6, cursor="hand2", command=_save,
+        ).pack(side="right")
+        tk.Button(
+            btn_row, text="Cancel", font=app._btn, relief="flat", bd=0,
+            bg=t["muted_bg"], fg=t["muted_fg"],
+            activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
+            padx=14, pady=6, cursor="hand2", command=prompt.destroy,
+        ).pack(side="right", padx=(0, 6))
+        if existing_override:
+            tk.Button(
+                btn_row, text="Remove override", font=app._btn, relief="flat", bd=0,
+                bg=t["muted_bg"], fg=t["muted_fg"],
+                activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
+                padx=12, pady=6, cursor="hand2", command=_remove,
+            ).pack(side="left")
+        entry.bind("<Return>", _save)
+        prompt.bind("<Escape>", lambda _e: prompt.destroy())
 
     def _btn(parent, text, command, accent=False):
         return tk.Button(
@@ -345,7 +439,18 @@ def open_schema_browser(app, name_filter=None):
 
     _btn(actions, "Copy physical",  lambda: _copy_from_selected_col(0)).pack(side="left", padx=(0, 6))
     _btn(actions, "Copy logical",   lambda: _copy_from_selected_col(1)).pack(side="left", padx=(0, 6))
-    _btn(actions, "Add column → User Map", _add_selected_to_user_map).pack(side="left", padx=(0, 6))
+    override_btn = _btn(actions, "Override logical name…", _override_selected_logical_name)
+    override_btn.pack(side="left", padx=(0, 6))
+    # Hover hint so users learn what the User Map override is for.
+    try:
+        app._attach_tooltip(
+            override_btn,
+            "Save a personal logical-name override for the selected column.\n"
+            "Stored in translator_custom_map.json. Always wins against\n"
+            "db_schema_output.json. Translation re-runs immediately on save.",
+        )
+    except Exception:
+        pass
     _btn(actions, "Close", dlg.destroy, accent=True).pack(side="right")
 
     # Initial render
@@ -381,13 +486,19 @@ def _build_table_rows(app):
 
 
 def _build_column_rows_by_table(app):
-    """Return {phys_table: [(phys_col, logical_col, other_tables_str)]}."""
+    """Return {phys_table: [(phys_col, logical_col, other_tables_str)]}.
+
+    Columns are ordered by their JSON declaration order (i.e. the natural
+    DB-definition order from db_schema_output.json) — not alphabetically.
+    Falls back to alpha sort for any column not in `app.table_column_order`
+    (defensive — shouldn't happen with normal data)."""
     by_table = {}
     for phys_col, entries in app.column_index.items():
         for sc, pt, lt, lc in entries:
             if sc == CUSTOM_SCHEMA:
                 continue
             by_table.setdefault(pt, []).append((phys_col, lc, sc, pt, lt))
+    order_map = getattr(app, "table_column_order", {}) or {}
     out = {}
     for pt, rows in by_table.items():
         # Collapse duplicates (same phys, same logical) for this table
@@ -395,17 +506,32 @@ def _build_column_rows_by_table(app):
         for phys_col, lc, sc, _pt, lt in rows:
             key = (phys_col, lc)
             seen.setdefault(key, []).append((sc, lt))
-        per_table = []
-        for (phys_col, lc), occ in sorted(seen.items()):
-            # "Other tables" → list of OTHER physical tables the same column
-            # appears in (excluding the current one).
+        # Build a one-row-per-(phys,logical) list with "other tables" string.
+        per_table = {}
+        for (phys_col, lc), occ in seen.items():
             other = sorted({
                 e[1] for e in app.column_index.get(phys_col, [])
                 if e[0] != CUSTOM_SCHEMA and e[1] != pt
             })
             other_s = ", ".join(other[:4]) + (f" +{len(other)-4}" if len(other) > 4 else "")
-            per_table.append((phys_col, lc or "", other_s))
-        out[pt] = sorted(per_table)
+            per_table[(phys_col, lc)] = (phys_col, lc or "", other_s)
+        # Order: JSON declaration order first, then anything left over A→Z.
+        ordered = []
+        seen_keys: set[tuple[str, str]] = set()
+        for phys_col in order_map.get(pt, []):
+            for key in list(per_table.keys()):
+                if key in seen_keys:
+                    continue
+                if key[0] == phys_col:
+                    ordered.append(per_table[key])
+                    seen_keys.add(key)
+        # Defensive trailer — anything not found in the order map (e.g. user
+        # overrides or schema drift) appended A–Z so it's still visible.
+        trailer = sorted(
+            (row for key, row in per_table.items() if key not in seen_keys),
+            key=lambda r: (r[0], r[1]),
+        )
+        out[pt] = ordered + trailer
     return out
 
 

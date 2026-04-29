@@ -128,13 +128,26 @@ Searchable two-pane window for looking up tables and columns without leaving
 the app. Tables on the left, columns of the selected table on the right
 (both physical *and* logical names side-by-side).
 
+- **Per-pane search**: `🔎 tables` filters only the Tables tree;
+  `🔎 columns` filters only the Columns tree — they don't fight each other,
+  so picking R_SYOHIN and then typing a column name works as expected.
+- **Show all** (next to the columns search) clears the table selection so
+  the global column list comes back.
+- **Column order**: when a table is selected, columns are listed in their
+  **JSON declaration order** (i.e. the same order as in `db_schema_output.json`),
+  not A–Z, so the view matches the actual DB definition.
+- **Esc** inside a search box clears it before falling through to closing
+  the dialog.
 - **Ctrl+Shift+B** opens it scoped to names found in the current input.
   A "Showing only N name(s) found in input" banner appears at the top with
   a *Clear filter* button. The Tables pane shrinks to those tables and the
   global Columns view shrinks to those columns. This replaces the old
   *Translation Table* mode's "list every name in this paste" view —
   with sortable columns, search, and copy actions on top.
-- Buttons: **Copy physical**, **Copy logical**, **Add column → User Map**.
+- Buttons: **Copy physical**, **Copy logical**, **Override logical name…**
+  (opens a small prompt prefilled with the current logical name; saves to
+  `translator_custom_map.json` and re-runs translation immediately — the
+  override always wins against `db_schema_output.json`), **Close**.
 
 ---
 

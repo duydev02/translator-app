@@ -11,8 +11,9 @@ SAMPLE_JSON = Path(__file__).parent.parent / "data" / "db_schema_output.sample.j
 
 @pytest.fixture
 def sample_index(tmp_path):
-    """Return the 5-tuple (table_index, column_index, rev_table_index,
-    rev_column_index, schemas) loaded from the sample schema JSON.
+    """Return the 6-tuple (table_index, column_index, rev_table_index,
+    rev_column_index, schemas, table_column_order) loaded from the sample
+    schema JSON.
 
     The committed sample file has a top-level '__comment__' string entry for
     human readers; load_index only expects schema→tables mappings, so we strip

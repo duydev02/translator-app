@@ -106,6 +106,22 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   `git status`. Pull this change and keep your existing local copy;
   new clones can copy `data/db_schema_output.sample.json` to bootstrap.
 
+### Changed
+- **Schema Browser column order now matches the JSON** — when a table is
+  selected, its columns render in the order they're declared in
+  `db_schema_output.json` (i.e. the natural DB definition order), not
+  forced A–Z. `load_index()` now also returns a `table_column_order`
+  map that the dialog uses; the API gained one return value (callers
+  destructure six values instead of five).
+- **"Add column → User Map" → "Override logical name…"** — the button
+  used to silently dump the existing `phys → logical` pair into the
+  User Map (where it added nothing), forcing users to open the User
+  Map dialog separately to actually edit. Now it opens a small inline
+  prompt prefilled with the current logical name (or the existing
+  override, if any), saves on Enter, re-runs translation immediately,
+  and exposes a "Remove override" button when one already exists. A
+  hover tooltip on the button explains what the override is for.
+
 ### Fixed
 - **Schema Browser search no longer fights itself** — the single search
   box that filtered both the Tables tree *and* the Columns tree was the

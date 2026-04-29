@@ -42,7 +42,7 @@ def test_parse_sql_identifies_statement_types():
 
 
 def test_java_to_design_doc_update_lowercase(sample_index):
-    table_index, column_index, rev_table_index, rev_column_index, _ = sample_index
+    table_index, column_index, rev_table_index, rev_column_index, _, _ = sample_index
     java = '''
     void f() {
         sb.append("update r_syohin ");
@@ -60,7 +60,7 @@ def test_java_to_design_doc_update_lowercase(sample_index):
 
 
 def test_java_to_design_doc_case_insensitivity(sample_index):
-    table_index, column_index, rev_table_index, rev_column_index, _ = sample_index
+    table_index, column_index, rev_table_index, rev_column_index, _, _ = sample_index
     java_lower = '''void f() { sb.append("update r_syohin set tanka = ? where syohin_cd = ?"); }'''
     java_mixed = '''void f() { sb.append("UPDATE R_Syohin SET Tanka = ? WHERE Syohin_Cd = ?"); }'''
     out_lower = java_to_design_doc(
@@ -77,7 +77,7 @@ def test_java_to_design_doc_case_insensitivity(sample_index):
 
 
 def test_java_to_design_doc_select_with_alias(sample_index):
-    table_index, column_index, rev_table_index, rev_column_index, _ = sample_index
+    table_index, column_index, rev_table_index, rev_column_index, _, _ = sample_index
     java = '''void f() { sb.append("select rs.syohin_cd from r_syohin rs"); }'''
     out = java_to_design_doc(
         java, table_index, column_index, rev_table_index, rev_column_index

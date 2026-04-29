@@ -299,7 +299,7 @@ class TranslatorApp(_BaseTk):
 
     # ── Data loading ──────────────────────────────────────────────────────────
     def _load_data(self):
-        ti, ci, rti, rci, schemas = load_index(self._json_path)
+        ti, ci, rti, rci, schemas, tco = load_index(self._json_path)
         self._user_map = load_user_map()
         merge_user_map(ti, ci, rti, rci, self._user_map)
 
@@ -307,6 +307,10 @@ class TranslatorApp(_BaseTk):
         self.column_index     = ci
         self.rev_table_index  = rti
         self.rev_column_index = rci
+        # phys_table → list of phys_cols in JSON declaration order. Used by
+        # the Schema Browser so columns of a selected table render in their
+        # natural DB definition order instead of being forced A–Z.
+        self.table_column_order = tco
         # CUSTOM_SCHEMA is exposed in the filter dropdown if user has any overrides
         self.schemas = list(schemas)
         if (self._user_map.get("tables") or self._user_map.get("columns")):
