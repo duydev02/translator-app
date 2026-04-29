@@ -5,6 +5,14 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **`Ctrl+Shift+B` — Schema Browser scoped to input names** — collects
+  every physical identifier in the current input that the translator
+  knows about, opens the Schema Browser, and pre-filters both panes
+  to just those tables/columns. A "Showing only N name(s) found in
+  input" banner appears with a *Clear filter* button. Replaces the
+  old Translation Table mode's "list every name in this paste" view
+  with a sortable, searchable, copy-friendly one. Also reachable from
+  the command palette.
 - **Inspect dialog redesign** — header summary cards (`Statement`, `Target`,
   `Columns`, `? binds`, `Warnings ✓`, plus `Ambiguous` / `Unknown` when
   relevant), per-tab search box with row counters, sortable column headers
@@ -81,6 +89,16 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   (instead of one-line cryptic notes).
 
 ### Removed
+- **Translation Table mode retired** — Inline Replace + hover tooltips
+  strictly dominated it for reading code (it preserved the surrounding
+  SQL, the table mode dumped a wall of text), and the Schema Browser
+  handles standalone lookups better. New `Ctrl+Shift+B` opens the
+  Schema Browser pre-scoped to the physical names found in the current
+  input, replacing the table mode's "list every name in this paste"
+  use case with a sortable, copy-friendly view. Settings/tabs that had
+  `mode: "table"` saved are migrated to `mode: "inline"` on load. The
+  `translate_table_mode` and `translate_reverse_table_mode` functions
+  and the `_render_table` UI path are gone, along with their tests.
 - **`db_schema_output.json` is no longer tracked in git** — the file is
   local data that changes frequently per developer and was already
   listed in `.gitignore` (it had been added before the ignore rule).

@@ -1945,7 +1945,7 @@ def java_to_design_doc(
             "⚠  No SQL found.\n\n"
             "The translator extracts SQL from `<buffer>.append(\"...\")` calls.\n"
             "If your method builds its query a different way, paste the SQL\n"
-            "directly and switch to Inline Replace or Translation Table mode."
+            "directly and switch to Inline Replace mode."
         )
 
     parsed = _parse_sql(sql)

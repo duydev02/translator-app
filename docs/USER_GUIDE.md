@@ -2,12 +2,6 @@
 
 ## Modes
 
-### Translation Table
-Structured listing. Every physical name found in the input is shown with:
-- its logical (Japanese) equivalent
-- every schema / table it lives in
-- a `⚠` marker if it has multiple different logical names (see *Inconsistency detector*)
-
 ### Inline Replace
 Same text you pasted, with physical names substituted in-place. Each replaced
 name is **underlined** and carries a hover tooltip:
@@ -125,6 +119,22 @@ so you can flip several sections without reopening. Closes on click-outside
 or `Esc`.
 
 Covers every `■` block and the `【SQL論理名】 / 【SQL定義名】` header lines.
+
+---
+
+## Schema Browser (Ctrl+B)
+
+Searchable two-pane window for looking up tables and columns without leaving
+the app. Tables on the left, columns of the selected table on the right
+(both physical *and* logical names side-by-side).
+
+- **Ctrl+Shift+B** opens it scoped to names found in the current input.
+  A "Showing only N name(s) found in input" banner appears at the top with
+  a *Clear filter* button. The Tables pane shrinks to those tables and the
+  global Columns view shrinks to those columns. This replaces the old
+  *Translation Table* mode's "list every name in this paste" view —
+  with sortable columns, search, and copy actions on top.
+- Buttons: **Copy physical**, **Copy logical**, **Add column → User Map**.
 
 ---
 

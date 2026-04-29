@@ -7,7 +7,7 @@ Also viewable in-app via **F1**.
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl + Enter` | Translate now |
-| `Ctrl + M` | Toggle Table / Inline / Design-Doc mode |
+| `Ctrl + M` | Toggle Inline / Design-Doc mode |
 | `Ctrl + Shift + D` | Toggle Forward / Reverse direction |
 
 ## Clipboard & files
@@ -43,6 +43,15 @@ Also viewable in-app via **F1**.
 | *Right-click selected text* | Add / remove exclusion |
 | `Ctrl + D` (inside dialog) | Delete selected line(s) |
 | `Ctrl + Z` / `Ctrl + Y` | Undo / redo |
+
+## Lookup
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl + B` | Open Schema Browser |
+| `Ctrl + Shift + B` | Open Schema Browser scoped to names found in input |
+| `Ctrl + J` | Open Snippets |
+| `Ctrl + P` (or `Cmd + P`) | Command palette |
 
 ## Other
 

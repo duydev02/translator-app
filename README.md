@@ -33,13 +33,17 @@ control); copy the sample to bootstrap a fresh clone.
 
 ## Features
 
-### Three translation modes
+### Two translation modes
 
 | Mode | Purpose |
 |------|---------|
-| **Translation Table** | Structured listing — every physical name found, its logical equivalent, and the schema/table where it lives. |
-| **Inline Replace** | Preserves the input text, substituting names in place. Underlined words carry hover tooltips with full context. |
+| **Inline Replace** | Preserves the input text, substituting names in place. Underlined words carry hover tooltips with full context (schema/table, ambiguity flag, alternate logical names). |
 | **Design Doc** | Parses a Java method that builds SQL via `StringBuffer.append(...)` and emits the corresponding `■処理区分 / ■登録テーブル / ■項目移送 …` design-doc template. |
+
+> The old *Translation Table* mode was retired in favour of Inline Replace +
+> hover tooltips (which preserves surrounding SQL context) and the Schema
+> Browser (`Ctrl+B`, or `Ctrl+Shift+B` to scope it to the names in your
+> current input).
 
 ### Direction switching
 

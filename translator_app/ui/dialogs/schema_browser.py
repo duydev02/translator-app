@@ -22,11 +22,22 @@ from ...themes import THEMES
 from ...paths import CUSTOM_SCHEMA
 
 
-def open_schema_browser(app):
+def open_schema_browser(app, name_filter=None):
+    """Open the Schema Browser.
+
+    name_filter: optional set of physical names. When provided, the Tables
+    tree is restricted to those tables, and the global Columns view is
+    restricted to those columns. Used by Ctrl+Shift+B to scope the browser
+    to identifiers found in the current input.
+    """
     existing = getattr(app, "_schema_browser_dialog", None)
     if existing and existing.winfo_exists():
+        # Re-apply the new scope so a fresh Ctrl+Shift+B re-scopes the open dialog
         existing.lift()
         existing.focus_force()
+        applier = getattr(existing, "_apply_name_filter", None)
+        if applier:
+            applier(name_filter)
         return
 
     t = THEMES[app._theme]
@@ -36,6 +47,19 @@ def open_schema_browser(app):
     dlg.geometry("1080x680")
     dlg.configure(bg=t["bg"])
     dlg.transient(app)
+
+    # Active name-filter (set when Ctrl+Shift+B opens the browser scoped to
+    # the names in the current input). Mutable via dlg._apply_name_filter().
+    active_filter = {"set": set(name_filter) if name_filter else None}
+
+    # Top: scope banner — packed first so it sits above the search bar.
+    # Visible only when active_filter["set"] is non-empty.
+    scope_frame = tk.Frame(dlg, bg=t["surface"])
+    scope_lbl = tk.Label(
+        scope_frame, text="", font=app._ui, anchor="w",
+        bg=t["surface"], fg=t["fg_muted"], padx=10, pady=4,
+    )
+    scope_lbl.pack(side="left", fill="x", expand=True)
 
     # Top: search bar
     search_frame = tk.Frame(dlg, bg=t["bg"])
@@ -130,13 +154,21 @@ def open_schema_browser(app):
     def _refresh_columns_view():
         cols_tree.delete(*cols_tree.get_children())
         q = search_var.get().strip().lower()
+        scope = active_filter["set"]
         if selected_table["phys"]:
             phys = selected_table["phys"]
             rows = all_cols_by_table.get(phys, [])
             columns_header_var.set(f"Columns of {phys} ({len(rows)})")
         else:
             rows = all_cols_global
-            columns_header_var.set(f"Columns (all tables)")
+            # When no table is selected, restrict the global column list to
+            # the input scope (column phys name in scope) so users see only
+            # names from their pasted text.
+            if scope:
+                rows = [r for r in rows if r[0] in scope]
+            columns_header_var.set(
+                f"Columns ({'scoped' if scope and not selected_table['phys'] else 'all tables'})"
+            )
         if q:
             rows = [r for r in rows if q in r[0].lower() or q in r[1].lower()]
         for r in rows[:5000]:   # cap for responsiveness
@@ -145,12 +177,16 @@ def open_schema_browser(app):
     def _refresh_tables_view():
         tables_tree.delete(*tables_tree.get_children())
         q = search_var.get().strip().lower()
+        scope = active_filter["set"]
         rows = tables
+        if scope:
+            rows = [r for r in rows if r[0] in scope]
         if q:
             rows = [r for r in rows if q in r[0].lower() or q in r[1].lower()]
         for r in rows:
             tables_tree.insert("", "end", values=r)
-        count_lbl.configure(text=f"{len(rows)} tables")
+        suffix = "  (scoped)" if scope else ""
+        count_lbl.configure(text=f"{len(rows)} tables{suffix}")
 
     def _on_search(*_):
         # If search is non-empty, also clear table selection so columns
@@ -172,6 +208,37 @@ def open_schema_browser(app):
 
     search_var.trace_add("write", _on_search)
     tables_tree.bind("<<TreeviewSelect>>", _on_table_select)
+
+    # Scope banner: shown when active_filter is non-empty. The "Clear filter"
+    # button clears the filter and re-renders both trees against the full set.
+    def _apply_name_filter(new_filter):
+        active_filter["set"] = set(new_filter) if new_filter else None
+        # Re-set search and selection to a clean state so the user sees the
+        # full scoped list (not an old in-table filter).
+        selected_table["phys"] = None
+        search_var.set("")
+        _sync_scope_banner()
+        _refresh_tables_view()
+        _refresh_columns_view()
+
+    def _sync_scope_banner():
+        s = active_filter["set"]
+        if s:
+            scope_lbl.configure(text=f"Showing only {len(s)} name(s) found in input — search and table selection still work")
+            # Pack above search_frame
+            scope_frame.pack(fill="x", padx=14, pady=(8, 0), before=search_frame)
+        else:
+            scope_frame.pack_forget()
+
+    tk.Button(
+        scope_frame, text="Clear filter", font=app._small,
+        relief="flat", bd=0, bg=t["muted_bg"], fg=t["muted_fg"],
+        padx=10, pady=2, cursor="hand2",
+        activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
+        command=lambda: _apply_name_filter(None),
+    ).pack(side="right", padx=6, pady=2)
+    # Expose so subsequent open_schema_browser calls can re-scope.
+    dlg._apply_name_filter = _apply_name_filter
 
     # Action bar
     actions = tk.Frame(dlg, bg=t["bg"])
@@ -223,6 +290,7 @@ def open_schema_browser(app):
     _btn(actions, "Close", dlg.destroy, accent=True).pack(side="right")
 
     # Initial render
+    _sync_scope_banner()
     _refresh_tables_view()
     _refresh_columns_view()
     search_entry.focus_set()
