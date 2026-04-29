@@ -53,6 +53,12 @@ Also viewable in-app via **F1**.
 | `Ctrl + J` | Open Snippets |
 | `Ctrl + P` (or `Cmd + P`) | Command palette |
 
+## Tools
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl + Shift + L` | 🛠 Extract SQL from log… (combine `?` placeholders with bound params from a `stclibApp.log`) |
+
 ## Other
 
 | Shortcut | Action |

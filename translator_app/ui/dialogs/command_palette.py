@@ -222,6 +222,10 @@ def _collect_commands(app):
     except Exception:
         pass
     try:
+        add("Extract SQL from log…", app.open_log_sql_dialog,       "Tool")
+    except Exception:
+        pass
+    try:
         add("Open Snippets…",       app.open_snippets_dialog,       "Dialog")
     except Exception:
         pass

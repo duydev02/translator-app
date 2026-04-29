@@ -52,6 +52,7 @@ control); copy the sample to bootstrap a fresh clone.
 
 ### Built-in helpers
 
+- **🛠 Tools → Extract SQL from log…** (`Ctrl+Shift+L`) — paste a `stclibApp.log` path + a query `id=…`, get back the SQL with all `?` placeholders filled in from the bound parameters. One click sends the runnable SQL into the translator's input so Inline Replace / Design Doc render against real values.
 - **⚙ Filter** — multi-select schemas *and* tables. Tables list scopes to the selected schemas, hover tooltips respect the filter, and the menu label always reflects the active scope (e.g. `all 87 T` when nothing is checked). Custom entries (see User Map) always bypass filters.
 - **⊘ Exclusions** — strings that must be preserved as-is. Right-click any selection to add/remove. Whole-word matching for identifiers; substring for Japanese labels.
 - **🖉 User Map** — hand-curated `physical ↔ logical` overrides that win against the JSON. Edit in a table UI or in the raw `translator_custom_map.json` file.

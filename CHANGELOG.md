@@ -5,6 +5,26 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **🛠 Tools menu + Extract SQL from log…** (`Ctrl+Shift+L`) — new
+  developer utility that reads a `stclibApp.log` (the log file
+  produced by `commons.dao.PreparedStatementEx`), finds an entry by
+  its `id=<HEX>` token, and substitutes the `?` placeholders in the
+  SQL with the bound parameters from the matching execute line. Dialog
+  mirrors the team's existing Excel macro: log-file picker, query-id
+  input, three side-by-side panes (SQL with `?` / raw param blob /
+  combined result), counts (SQL length, `?` count, params count), and
+  buttons for **Process / Get last SQL / Clear / Copy result / Send
+  to translator input**. The last button drops the runnable SQL
+  straight into the active doc tab so Inline Replace or Design Doc
+  re-runs against real values. A new `🛠 Tools` menubutton next to
+  `⚙ Settings` houses this and future developer utilities so the
+  translator's main UI stays clean. Param formatter recognises
+  `STRING / INT / DECIMAL / DOUBLE / DATE / TIMESTAMP / NULL /
+  BOOLEAN / BYTES`; unknown types fall back to single-quoted strings.
+  Quote-aware substitution skips `?` inside string literals. Last-used
+  log path is persisted in `translator_settings.json`. Reachable from
+  the Tools menu, the command palette, the input pane's right-click
+  context menu, and the keyboard.
 - **`Ctrl+Shift+B` — Schema Browser scoped to input names** — collects
   every physical identifier in the current input that the translator
   knows about, opens the Schema Browser, and pre-filters both panes

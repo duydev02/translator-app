@@ -206,6 +206,9 @@ class TranslatorApp(_BaseTk):
         # Ctrl+Shift+B: open Schema Browser pre-filtered to names found in input
         self.bind_all("<Control-Shift-B>",    lambda e: self.open_schema_browser_for_input())
         self.bind_all("<Command-Shift-B>",    lambda e: self.open_schema_browser_for_input())
+        # Ctrl+Shift+L: 🛠 Extract SQL from log… (Ctrl+L alone toggles line numbers)
+        self.bind_all("<Control-Shift-L>",    lambda e: self.open_log_sql_dialog())
+        self.bind_all("<Command-Shift-L>",    lambda e: self.open_log_sql_dialog())
         self.bind_all("<Control-j>",          lambda e: self.open_snippets_dialog())
         self.bind_all("<Command-j>",          lambda e: self.open_snippets_dialog())
         self.bind_all("<Control-t>",          lambda e: self._new_doc_tab())
@@ -422,6 +425,21 @@ class TranslatorApp(_BaseTk):
             command=self.on_reload_json,
         )
         self._settings_btn.pack(side="right", pady=8)
+
+        # ── 🛠 Tools menubutton ─────────────────────────────────────────────
+        # Houses developer utilities that aren't part of the translation
+        # pipeline (log → SQL extractor first; future tools slot in here
+        # without crowding the main mode tabs or the Settings menu).
+        self._tools_btn = tk.Menubutton(self._topbar, text="🛠  Tools",
+            font=self._ui_b, relief="flat", padx=12, pady=4, cursor="hand2", bd=0)
+        self._tools_menu = tk.Menu(self._tools_btn, tearoff=0)
+        self._tools_btn["menu"] = self._tools_menu
+        self._tools_menu.add_command(
+            label="Extract SQL from log…",
+            accelerator="Ctrl+Shift+L",
+            command=self.open_log_sql_dialog,
+        )
+        self._tools_btn.pack(side="right", padx=(0, 6), pady=8)
 
         # ── Doc-tab bar (multi-input) ────────────────────────────────────────
         self._doctabs_bar = tk.Frame(self, height=30)
@@ -705,7 +723,7 @@ class TranslatorApp(_BaseTk):
             activebackground=t["accent"], activeforeground=t["accent_fg"])
         for btn in (self._copy_btn, self._save_btn, self._inspect_btn,
                     self._help_btn, self._history_btn,
-                    self._settings_btn,
+                    self._settings_btn, self._tools_btn,
                     self._doctabs_newbtn,
                     *self._small_buttons):
             btn.configure(bg=t["muted_bg"], fg=t["muted_fg"],
@@ -719,6 +737,7 @@ class TranslatorApp(_BaseTk):
         # entries (Line numbers / Word wrap / Auto-paste).
         for menu in (
             getattr(self, "_settings_menu", None),
+            getattr(self, "_tools_menu",    None),
             getattr(self, "_history_menu",  None),
         ):
             if menu is None:
@@ -2242,6 +2261,8 @@ class TranslatorApp(_BaseTk):
             menu.add_command(label="✕  Clear input  (Ctrl+⌫)", command=self.on_clear)
             menu.add_command(label="📋  Save as snippet…",      command=self.open_snippets_dialog)
             menu.add_command(label="📂  Open file…",             command=self.on_open_file)
+            menu.add_command(label="🛠  Extract SQL from log…  (Ctrl+Shift+L)",
+                             command=self.open_log_sql_dialog)
 
         menu.add_separator()
         menu.add_command(label="Open exclusion list…", command=self.open_exclusions_dialog)
@@ -2427,6 +2448,11 @@ class TranslatorApp(_BaseTk):
         from .dialogs.schema_browser import open_schema_browser
         open_schema_browser(self)
 
+    def open_log_sql_dialog(self):
+        """🛠 Tools → Extract SQL from log… (Ctrl+Shift+L)"""
+        from .dialogs.log_sql import open_log_sql_dialog
+        open_log_sql_dialog(self)
+
     def open_schema_browser_for_input(self):
         """Open Schema Browser pre-filtered to physical names found in the
         current input (Ctrl+Shift+B). Replaces the old Translation Table
@@ -2483,6 +2509,7 @@ class TranslatorApp(_BaseTk):
             (self._tab_forward,  "Translate physical → logical names"),
             (self._tab_reverse,  "Translate logical → physical names"),
             (self._settings_btn, "Theme, layout, filter, exclusions, user map, file operations"),
+            (self._tools_btn,    "Developer tools: extract SQL from log… (Ctrl+Shift+L)"),
             (self._help_btn,     "Help & keyboard shortcuts (F1)"),
             (self._translate_btn,"Translate the input (Ctrl+Enter)"),
             (self._copy_btn,     "Copy output to clipboard (Ctrl+Shift+C)"),

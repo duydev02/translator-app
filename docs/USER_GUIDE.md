@@ -151,6 +151,44 @@ the app. Tables on the left, columns of the selected table on the right
 
 ---
 
+## 🛠 Tools
+
+A separate menubutton next to *⚙ Settings* hosts developer utilities that
+aren't part of the translation pipeline. Currently:
+
+### Extract SQL from log… (`Ctrl+Shift+L`)
+
+Reads a `stclibApp.log` produced by `commons.dao.PreparedStatementEx`,
+finds an entry by its `id=<HEX>` token, and substitutes the `?`
+placeholders in the SQL with the bound parameters — giving you a
+runnable, fully-formed SQL.
+
+- **Log file**: pick any `*.log` or paste a path. The last-used path is
+  remembered across runs.
+- **Query ID**: the `id=` value you saw in the log (e.g. `189369c1`).
+- **Using log** (default ON): Process pulls the SQL + params from the
+  file. Toggle OFF to paste SQL and `[STRING:1:…][STRING:2:…]` blob
+  directly — useful when you've copied them from somewhere else.
+- **Get last SQL**: scans the file for the most recent `<init>`/execute
+  pair (the latest fully-bound prepared statement) and loads it.
+- **Process** (`Enter` in the ID field also triggers): runs the
+  combiner. Counts shown below: `SQL length`, `[?] count`, `Params
+  count`. Mismatched counts get a yellow notice.
+- **Result actions**:
+  - **Copy result**: clipboard, ready to paste into your DB tool.
+  - **Send to translator input**: replaces the active doc tab's input
+    with the runnable SQL and re-runs translation immediately, so
+    Inline Replace or Design Doc renders the Japanese names against
+    real values.
+
+Param types recognised by the formatter: `STRING` / `CHAR` / `VARCHAR`
+/ `CLOB` (single-quoted with `''` escaping); `INT` / `BIGINT` /
+`DECIMAL` / `DOUBLE` / `FLOAT` (bare); `DATE` / `TIMESTAMP` / `TIME`
+(quoted); `NULL` (keyword); `BOOLEAN` (1/0); `BYTES` / `BLOB` (hex).
+Unknown types fall back to single-quoted strings.
+
+---
+
 ## History (⌄)
 
 Last 10 distinct inputs, saved across sessions. Triggered only by explicit
