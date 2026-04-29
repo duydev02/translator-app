@@ -60,6 +60,15 @@ Multi-select which schemas and tables are considered.
 
 - Strict: if a column has no entry in a selected schema/table, it's simply not
   translated (rather than silently falling back).
+- **Schema-scoped tables list**: ticking a schema hides tables that don't
+  belong to it (and auto-clears any that were previously checked). Untick all
+  schemas to see every table again. Apply additionally drops stale table
+  selections that fall outside the selected schemas.
+- **Hover tooltip respects the filter** too — the popup over a translated
+  word only lists schemas/tables that match your current filter.
+- **Empty = all** — when nothing is checked the menu label and the post-Apply
+  toast still show counts (e.g. `all 20 S · all 1343 T`). When schemas are
+  selected, the table total switches to the count *within* those schemas.
 - User-Map entries **always** bypass filters — team overrides still apply.
 
 ---

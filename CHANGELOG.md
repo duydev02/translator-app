@@ -80,7 +80,27 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   doesn't parse, no SQL is found, or the statement type is unknown
   (instead of one-line cryptic notes).
 
+### Removed
+- **`db_schema_output.json` is no longer tracked in git** — the file is
+  local data that changes frequently per developer and was already
+  listed in `.gitignore` (it had been added before the ignore rule).
+  Untracking stops phantom `M db_schema_output.json` from cluttering
+  `git status`. Pull this change and keep your existing local copy;
+  new clones can copy `data/db_schema_output.sample.json` to bootstrap.
+
 ### Fixed
+- **Filter scope leak** — selecting only a schema in the Filter dialog
+  no longer lets tables from other schemas slip through. The Tables
+  list now scopes to the selected schemas (out-of-scope checkboxes are
+  hidden and auto-uncleared), Apply prunes any stale table selections
+  whose phys-table doesn't belong to a chosen schema, and the hover
+  tooltip in the output now respects the active schema/table filter
+  instead of always showing every entry from every schema.
+- **Filter button label clarity** — the Settings → Filter… entry and
+  the post-Apply toast now spell out totals (`all 87 T`, `1/20 S · all
+  87 T`) so an empty selection clearly reads as "everything in scope"
+  instead of `0`. When schemas are selected, the table total reflects
+  tables in those schemas only.
 - **Stats target shows variable name, not `0`** — when the target table
   is a Java variable (`UPDATE <buffer> + tableName + " SET ..."`), the
   Inspect dialog summary card and the stats chip resolve the placeholder

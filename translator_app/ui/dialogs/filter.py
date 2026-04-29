@@ -28,26 +28,40 @@ def open_filter_dialog(app):
     tk.Label(left, text="Schemas", font=app._ui_b,
         bg=t["bg"], fg=t["fg"], anchor="w").pack(fill="x")
 
+    # phys_table → set of schemas it belongs to (used to scope the Tables list)
+    phys_to_schemas = {
+        phys: {sch for sch, _lg in entries}
+        for phys, entries in app.table_index.items()
+    }
+
     schema_vars = {}
     schema_frame = tk.Frame(left, bg=t["surface"], padx=6, pady=6)
     schema_frame.pack(fill="both", expand=True, pady=(4, 4))
+    # `_refresh_table_visibility` is defined later (after table widgets exist);
+    # forward-declare a slot so schema checkbox callbacks can call it safely.
+    _scope_cb = {"fn": lambda: None}
     for s in app.schemas:
         v = tk.BooleanVar(value=(s in app._filter_schemas) if app._filter_schemas else False)
         schema_vars[s] = v
         cb = tk.Checkbutton(schema_frame, text=s, variable=v,
             bg=t["surface"], fg=t["fg"], selectcolor=t["bg"],
             activebackground=t["surface"], activeforeground=t["fg"],
-            font=app._ui, anchor="w", bd=0, highlightthickness=0)
+            font=app._ui, anchor="w", bd=0, highlightthickness=0,
+            command=lambda: _scope_cb["fn"]())
         cb.pack(fill="x", anchor="w")
 
     sch_btns = tk.Frame(left, bg=t["bg"])
     sch_btns.pack(fill="x")
+    def _set_all_schemas(value):
+        for v in schema_vars.values():
+            v.set(value)
+        _scope_cb["fn"]()
     tk.Button(sch_btns, text="All", font=app._small, relief="flat", bd=0,
         bg=t["muted_bg"], fg=t["muted_fg"], padx=10, pady=2, cursor="hand2",
-        command=lambda: [v.set(True) for v in schema_vars.values()]).pack(side="left")
+        command=lambda: _set_all_schemas(True)).pack(side="left")
     tk.Button(sch_btns, text="None", font=app._small, relief="flat", bd=0,
         bg=t["muted_bg"], fg=t["muted_fg"], padx=10, pady=2, cursor="hand2",
-        command=lambda: [v.set(False) for v in schema_vars.values()]).pack(side="left", padx=(6, 0))
+        command=lambda: _set_all_schemas(False)).pack(side="left", padx=(6, 0))
 
     # ── Right: tables (search + scrollable checkbox list) ──
     right = tk.Frame(body, bg=t["bg"])
@@ -120,20 +134,42 @@ def open_filter_dialog(app):
         cb.pack(fill="x", anchor="w")
         table_labels.append((phys, cb, f"{phys} {logical} {schema}".lower()))
 
+    def _selected_schemas():
+        return {s for s, v in schema_vars.items() if v.get()}
+
+    def _table_in_scope(phys, sel):
+        # No schema selected = no scope restriction. Otherwise only show tables
+        # whose phys_table is bound to at least one selected schema.
+        if not sel:
+            return True
+        owners = phys_to_schemas.get(phys, set())
+        return bool(owners & sel)
+
     def _filter_tables(*_):
         q = search_var.get().strip().lower()
-        for _, cb, hay in table_labels:
-            if not q or q in hay:
+        sel = _selected_schemas()
+        for phys, cb, hay in table_labels:
+            in_scope = _table_in_scope(phys, sel)
+            matches_q = (not q) or (q in hay)
+            if in_scope and matches_q:
                 cb.pack(fill="x", anchor="w")
             else:
                 cb.pack_forget()
+                # Auto-uncheck out-of-scope tables so they don't silently apply.
+                if not in_scope:
+                    table_vars[phys].set(False)
     search_var.trace_add("write", _filter_tables)
+    _scope_cb["fn"] = _filter_tables  # wire schema toggles → table list refresh
+    _filter_tables()  # apply initial scope based on existing _filter_schemas
 
     tbl_btns = tk.Frame(right, bg=t["bg"])
     tbl_btns.pack(fill="x")
     def _set_all_visible(value):
         q = search_var.get().strip().lower()
+        sel = _selected_schemas()
         for phys, cb, hay in table_labels:
+            if not _table_in_scope(phys, sel):
+                continue
             if not q or q in hay:
                 table_vars[phys].set(value)
     tk.Button(tbl_btns, text="All (visible)", font=app._small, relief="flat", bd=0,
@@ -150,16 +186,34 @@ def open_filter_dialog(app):
     def _clear_all():
         for v in schema_vars.values(): v.set(False)
         for v in table_vars.values():  v.set(False)
+        _filter_tables()
 
     def _apply():
-        app._filter_schemas = {s for s, v in schema_vars.items() if v.get()}
-        app._filter_tables  = {t_ for t_, v in table_vars.items() if v.get()}
+        sel_schemas = {s for s, v in schema_vars.items() if v.get()}
+        sel_tables  = {t_ for t_, v in table_vars.items() if v.get()}
+        # Drop any selected tables that don't belong to a selected schema —
+        # otherwise they leak through and translate against another schema.
+        if sel_schemas:
+            sel_tables = {
+                t_ for t_ in sel_tables
+                if phys_to_schemas.get(t_, set()) & sel_schemas
+            }
+        app._filter_schemas = sel_schemas
+        app._filter_tables  = sel_tables
         app._refresh_filter_btn()
         dlg.destroy()
         app.on_translate()
-        app._toast.show(
-            f"Filter: {len(app._filter_schemas)} schemas · {len(app._filter_tables)} tables",
-            1500, "success")
+        total_s = len(app.schemas)
+        if sel_schemas:
+            total_t = sum(
+                1 for owners in phys_to_schemas.values()
+                if owners & sel_schemas
+            )
+        else:
+            total_t = len(app.table_index)
+        s_msg = f"{len(sel_schemas)}/{total_s} schemas" if sel_schemas else f"all {total_s} schemas"
+        t_msg = f"{len(sel_tables)}/{total_t} tables"   if sel_tables  else f"all {total_t} tables"
+        app._toast.show(f"Filter: {s_msg} · {t_msg}", 1500, "success")
 
     tk.Button(footer, text="Apply", font=app._btn, relief="flat", bd=0,
         bg=t["accent"], fg=t["accent_fg"], padx=18, pady=6, cursor="hand2",

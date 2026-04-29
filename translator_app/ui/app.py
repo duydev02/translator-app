@@ -18,6 +18,7 @@ from ..designdoc import java_to_design_doc, compute_design_stats
 from ..paths import BASE_DIR, CUSTOM_SCHEMA, MAX_HISTORY, USER_MAP_FILE
 from ..schema import (
     _filter_by_table_context,
+    _filter_entries,
     _is_ambiguous,
     load_index,
     merge_user_map,
@@ -2084,21 +2085,35 @@ class TranslatorApp(_BaseTk):
                 )
             return lines
 
+        # Apply the user's schema/table filter to tooltip lookups so hover
+        # results match what's actually translated. Without this, the popup
+        # shows entries from every schema even when the filter excludes them.
+        f_schemas = self._filter_schemas or None
+        f_tables  = self._filter_tables  or None
+
         def _from_fwd_table(original):
+            entries = _filter_entries(self.table_index[original],
+                                      schemas=f_schemas, has_phys_table=False)
             return (f"Table: {original}",
-                    _format_table_groups(_group_table_entries(self.table_index[original])))
+                    _format_table_groups(_group_table_entries(entries)))
 
         def _from_fwd_col(original):
-            entries = _filter_by_table_context(self.column_index[original], ctx)
+            entries = _filter_entries(self.column_index[original],
+                                      schemas=f_schemas, tables=f_tables, has_phys_table=True)
+            entries = _filter_by_table_context(entries, ctx)
             return (f"Column: {original}",
                     _format_col_groups(_group_col_entries(entries)))
 
         def _from_rev_table(original):
+            entries = _filter_entries(self.rev_table_index[original],
+                                      schemas=f_schemas, tables=f_tables, has_phys_table=True)
             return (f"Table: {original}",
-                    _format_table_groups(_group_table_entries(self.rev_table_index[original])))
+                    _format_table_groups(_group_table_entries(entries)))
 
         def _from_rev_col(original):
-            entries = _filter_by_table_context(self.rev_column_index[original], ctx)
+            entries = _filter_entries(self.rev_column_index[original],
+                                      schemas=f_schemas, tables=f_tables, has_phys_table=True)
+            entries = _filter_by_table_context(entries, ctx)
             return (f"Column: {original}",
                     _format_col_groups(_group_col_entries(entries)))
 
@@ -2118,8 +2133,13 @@ class TranslatorApp(_BaseTk):
         tests = {fn: pred for fn, pred in fwd_tests}
         for fn in order:
             if tests[fn](original):
-                header, body = fn(original)
-                break
+                h, b = fn(original)
+                # Filter may have zeroed this category — keep trying others.
+                if b:
+                    header, body = h, b
+                    break
+                if header is None:
+                    header, body = h, b  # remember as fallback
         if header is None:
             return
 
@@ -2334,12 +2354,19 @@ class TranslatorApp(_BaseTk):
     def _refresh_filter_btn(self):
         ns = len(self._filter_schemas)
         nt = len(self._filter_tables)
-        parts = []
-        if ns: parts.append(f"{ns}S")
-        if nt: parts.append(f"{nt}T")
-        label = "⚙  Filter…"
-        if parts:
-            label += f" ({' / '.join(parts)})"
+        total_s = len(self.schemas)
+        # When schemas are selected, "all tables" means tables in those schemas,
+        # not the full DB — otherwise the count is misleading.
+        if self._filter_schemas:
+            total_t = sum(
+                1 for entries in self.table_index.values()
+                if any(sc in self._filter_schemas for sc, _ in entries)
+            )
+        else:
+            total_t = len(self.table_index)
+        s_part = f"{ns}/{total_s} S" if ns else f"all {total_s} S"
+        t_part = f"{nt}/{total_t} T" if nt else f"all {total_t} T"
+        label = f"⚙  Filter…  ({s_part}  ·  {t_part})"
         self._settings_menu.entryconfigure(self._SETTINGS_IDX_FILTER, label=label)
 
     def open_filter_dialog(self):

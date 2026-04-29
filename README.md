@@ -25,7 +25,9 @@ Built with Python + Tkinter. Ships as a single-file Windows executable.
 
 If `db_schema_output.json` is missing, a dialog will tell you so on startup.
 See [`data/db_schema_output.sample.json`](data/db_schema_output.sample.json)
-for the expected file format.
+for the expected file format. The file is **gitignored** — each developer
+keeps a local copy (it changes frequently and doesn't belong in version
+control); copy the sample to bootstrap a fresh clone.
 
 ---
 
@@ -46,7 +48,7 @@ for the expected file format.
 
 ### Built-in helpers
 
-- **⚙ Filter** — multi-select schemas *and* tables. Custom entries (see User Map) always bypass filters.
+- **⚙ Filter** — multi-select schemas *and* tables. Tables list scopes to the selected schemas, hover tooltips respect the filter, and the menu label always reflects the active scope (e.g. `all 87 T` when nothing is checked). Custom entries (see User Map) always bypass filters.
 - **⊘ Exclusions** — strings that must be preserved as-is. Right-click any selection to add/remove. Whole-word matching for identifiers; substring for Japanese labels.
 - **🖉 User Map** — hand-curated `physical ↔ logical` overrides that win against the JSON. Edit in a table UI or in the raw `translator_custom_map.json` file.
 - **⚠ Inconsistencies** — scans the JSON for columns with conflicting logical names across tables and lets you promote one variant to a User-Map override with one click.
