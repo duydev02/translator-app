@@ -5,6 +5,145 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **🛠 Extract SQL from log… UX overhaul** — the dialog now shows a
+  row of **chip buttons** at the top, one per recent log path
+  (labelled with the last 2 path segments, e.g.
+  `…/mdw_lawmasterhansoku-web/log`). Click a chip to switch logs
+  instantly; right-click for *Remove* / *Open containing folder*. Up
+  to 8 chips, and a **+ Add log** button picks a new one. Replaces
+  the old dropdown — designed for hopping between sub-projects
+  (`lawmasterhansoku-web` ↔ `lawdailyorder-web` …) without re-typing
+  paths. The full active path is shown in monospace below the chip
+  strip.
+- **Auto-reload (mtime poll)** — a new `☑ Auto` checkbox next to
+  Reload watches the active log file's mtime while the dialog is
+  open and auto-re-parses on change (~1.5 s lag). Selection is
+  preserved across reloads so you don't lose your place when the
+  server appends new entries. Toggleable; persisted per project in
+  `translator_settings.json`.
+- **Extract SQL — Tier-1 polish pass** — four UX upgrades to the
+  Result tab and statement list:
+
+  - **Syntax highlighting on Result** — keywords, string literals,
+    numbers, and `--` / `/* */` comments now render in distinct
+    colors (theme-aware: blue/green/purple/grey on light, softer
+    VS-Code-ish palette on dark). A new `tokenize_sql_for_highlight`
+    function in `logsql.py` produces the offset list; the dialog
+    applies tags to the Tk Text widget.
+  - **Bind-substituted values are visually called out** — values
+    that came from `?` placeholders (e.g. `'0018      '`, `42`) get
+    an accent foreground + subtle background tint so at a glance
+    you can tell what came from the original SQL vs what the JDBC
+    driver bound. Implemented via sentinel markers (`\x01…\x02`)
+    that survive `pretty_sql` and are stripped at the last moment,
+    recovering the (start, end) ranges in the final coordinates.
+    New helpers: `combine_sql_params_marked` /
+    `extract_subst_ranges` / `SUBST_OPEN` / `SUBST_CLOSE`.
+  - **Sortable column headers** — click `Time` / `ID` / `DAO` /
+    `Type` / `Tables` / `?` / `Score` to sort the statement list;
+    click again to flip direction. A `▼` / `▲` glyph next to the
+    active column makes the state obvious. Sort happens *within*
+    each action group so the grouping isn't lost. Default direction
+    is descending for `Score` and `?`-count (most-useful-first),
+    ascending for the rest.
+  - **Statement-type filter chips** — a second row in the filter
+    bar with checkboxes for `SELECT / INSERT / UPDATE / DELETE /
+    OTHER`, plus `All` / `None` shortcuts. State persists per
+    project in `translator_settings.json`. Most days you only care
+    about one type — flipping checkboxes is faster than typing
+    `SELECT` into search.
+
+- **Extract SQL is now a one-click topbar button** — the previous
+  `🛠 Tools` menu (which had only one entry) is replaced by a direct
+  `🛠 Extract SQL` button on the topbar. One click instead of two,
+  same icon, same `Ctrl+Shift+L` shortcut, same right-click and
+  command-palette entries. If more developer tools land later we'll
+  re-introduce the menubutton — for now the menu was pure overhead
+  on the most-used tool in the dialog suite.
+- **In-tab Copy button + Auto-copy toggle on the Result pane** — the
+  Result tab now has its own toolbar with a `📋 Copy` button (so the
+  primary action is right next to the content, not hidden in the
+  bottom button row) and an `☑ Auto-copy` checkbox. When Auto-copy
+  is on, every statement you click in the list is silently pushed to
+  the clipboard with a quick toast confirmation — pick a row, paste
+  into your DB tool, no extra clicks. Toggling the checkbox while a
+  statement is already selected copies it immediately so the toggle
+  takes effect for what you're currently looking at. Persisted in
+  `translator_settings.json`.
+- **Result tab is first + prettified** — the detail notebook order is
+  now Result → SQL → Params (Result is the value users came for). A
+  new lightweight `pretty_sql()` formatter inserts newlines before
+  major clauses (SELECT / FROM / WHERE / ORDER BY / GROUP BY /
+  HAVING / UNION / WITH / VALUES / INSERT INTO / SET / MERGE INTO /
+  LIMIT / OFFSET / FETCH FIRST), indents each JOIN under FROM, and
+  indents AND/OR connectives under their parent clause. Quote-aware
+  (skips keywords inside `'…'` literals), works on both browse-mode
+  results and Direct-mode results, and is what `Copy result` /
+  `Send to translator input` ship out (so what you see is what you
+  get). Settings auto-migrate to add `auto_reload: true`.
+- **🛠 Tools menu + Extract SQL from log…** (`Ctrl+Shift+L`) — new
+  developer utility that parses an entire `stclibApp.log`, surfaces
+  the 1–2 *primary* business queries above the dozens of
+  infrastructure calls, and combines `?` placeholders with bound
+  parameters into a runnable SQL.
+
+  **Browse mode** (default): pick a log from a recent-paths dropdown
+  (up to 8 — designed for hopping between sub-projects like
+  `lawmasterhansoku-web` and `lawdailyorder-web`); the dialog parses
+  the whole file and shows every prepared statement in a treeview,
+  grouped under the user request that triggered each batch
+  (`commons.struts.RequestProcessor,callMethod` markers, with
+  1-second time-gap fallback for orphans). Each statement carries its
+  timestamp, hex id, DAO short name, statement type, target tables,
+  bind count, and a primary-vs-noise score; statements scoring ≥ 30
+  get a ★ tag. A 🔎 search box filters by id / DAO / table / SQL
+  substring. **☑ Hide infrastructure** (on by default) shows only ★
+  statements. Click a row → SQL / Params / Result render in tabs
+  below. The first ★ statement is auto-selected after each load.
+
+  **Scoring** combines DAO package signal (configurable
+  `noise_packages` defaults to `swc.commons` + `mdware.common`;
+  optional `primary_packages` adds a +50 bonus per match), SQL length,
+  `WITH` / `JOIN` / `UNION` presence, bound-param count, and a
+  noise-table list (`SYSTEM_CONTROL`, `DT_TABLE_LOG`, `R_MESSAGE`,
+  `R_DICTIONARY_CONTROL`, `R_NAMECTF`). All thresholds and lists are
+  per-project in `translator_settings.json`. A 2-pass FQCN fill
+  ensures statements whose `InvokeDao` line appears *after* their
+  init line (e.g. when the log file starts mid-stream) still get the
+  right DAO attribution.
+
+  **Direct mode** is preserved as a fallback for users who already
+  have the SQL + param blob on the clipboard and don't have the log
+  file handy — three side-by-side panes with a Process button, same
+  combiner.
+
+  **Result actions**: *Copy result* (clipboard) and *Send to
+  translator input* (drops the runnable SQL into the active doc tab
+  and re-runs translation immediately, so Inline Replace / Design Doc
+  render against real values).
+
+  **Architecture**: a new `🛠 Tools` menubutton sits next to
+  `⚙ Settings` in the top bar; future developer utilities slot in
+  under there without crowding the translation UI. Param formatter
+  recognises `STRING / CHAR / VARCHAR / CLOB / INT / BIGINT / DECIMAL
+  / DOUBLE / FLOAT / DATE / TIMESTAMP / TIME / NULL / BOOLEAN / BYTES
+  / BLOB`; unknown types fall back to single-quoted strings.
+  Quote-aware substitution skips `?` inside string literals.
+  Reachable from the Tools menu, the command palette, the input
+  pane's right-click context menu, and `Ctrl+Shift+L` /
+  `Cmd+Shift+L`.
+
+  Settings auto-migrate from the v1 single-`last_path` shape to the
+  v2 `recent_paths` list on first open, so existing users don't lose
+  their saved path.
+- **`Ctrl+Shift+B` — Schema Browser scoped to input names** — collects
+  every physical identifier in the current input that the translator
+  knows about, opens the Schema Browser, and pre-filters both panes
+  to just those tables/columns. A "Showing only N name(s) found in
+  input" banner appears with a *Clear filter* button. Replaces the
+  old Translation Table mode's "list every name in this paste" view
+  with a sortable, searchable, copy-friendly one. Also reachable from
+  the command palette.
 - **Inspect dialog redesign** — header summary cards (`Statement`, `Target`,
   `Columns`, `? binds`, `Warnings ✓`, plus `Ambiguous` / `Unknown` when
   relevant), per-tab search box with row counters, sortable column headers
@@ -81,6 +220,16 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   (instead of one-line cryptic notes).
 
 ### Removed
+- **Translation Table mode retired** — Inline Replace + hover tooltips
+  strictly dominated it for reading code (it preserved the surrounding
+  SQL, the table mode dumped a wall of text), and the Schema Browser
+  handles standalone lookups better. New `Ctrl+Shift+B` opens the
+  Schema Browser pre-scoped to the physical names found in the current
+  input, replacing the table mode's "list every name in this paste"
+  use case with a sortable, copy-friendly view. Settings/tabs that had
+  `mode: "table"` saved are migrated to `mode: "inline"` on load. The
+  `translate_table_mode` and `translate_reverse_table_mode` functions
+  and the `_render_table` UI path are gone, along with their tests.
 - **`db_schema_output.json` is no longer tracked in git** — the file is
   local data that changes frequently per developer and was already
   listed in `.gitignore` (it had been added before the ignore rule).
@@ -88,7 +237,34 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   `git status`. Pull this change and keep your existing local copy;
   new clones can copy `data/db_schema_output.sample.json` to bootstrap.
 
+### Changed
+- **Schema Browser column order now matches the JSON** — when a table is
+  selected, its columns render in the order they're declared in
+  `db_schema_output.json` (i.e. the natural DB definition order), not
+  forced A–Z. `load_index()` now also returns a `table_column_order`
+  map that the dialog uses; the API gained one return value (callers
+  destructure six values instead of five).
+- **"Add column → User Map" → "Override logical name…"** — the button
+  used to silently dump the existing `phys → logical` pair into the
+  User Map (where it added nothing), forcing users to open the User
+  Map dialog separately to actually edit. Now it opens a small inline
+  prompt prefilled with the current logical name (or the existing
+  override, if any), saves on Enter, re-runs translation immediately,
+  and exposes a "Remove override" button when one already exists. A
+  hover tooltip on the button explains what the override is for.
+
 ### Fixed
+- **Schema Browser search no longer fights itself** — the single search
+  box that filtered both the Tables tree *and* the Columns tree was the
+  reason that selecting `R_SYOHIN` after searching for it produced an
+  empty columns view (the same query was excluding rows like
+  `SYOHIN_CD`). The dialog now has **two scoped searches**, one above
+  each pane: `🔎 tables` filters tables only, `🔎 columns` filters
+  columns only. Each pane shows its own row count. A `Show all` button
+  appears in the columns search bar while a table is selected, so one
+  click brings the global column list back. `Esc` inside a search
+  entry clears it (so it takes one keystroke to escape a stale query)
+  before falling through to the dialog-level Esc-to-close.
 - **Filter scope leak** — selecting only a schema in the Filter dialog
   no longer lets tables from other schemas slip through. The Tables
   list now scopes to the selected schemas (out-of-scope checkboxes are

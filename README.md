@@ -33,13 +33,17 @@ control); copy the sample to bootstrap a fresh clone.
 
 ## Features
 
-### Three translation modes
+### Two translation modes
 
 | Mode | Purpose |
 |------|---------|
-| **Translation Table** | Structured listing — every physical name found, its logical equivalent, and the schema/table where it lives. |
-| **Inline Replace** | Preserves the input text, substituting names in place. Underlined words carry hover tooltips with full context. |
+| **Inline Replace** | Preserves the input text, substituting names in place. Underlined words carry hover tooltips with full context (schema/table, ambiguity flag, alternate logical names). |
 | **Design Doc** | Parses a Java method that builds SQL via `StringBuffer.append(...)` and emits the corresponding `■処理区分 / ■登録テーブル / ■項目移送 …` design-doc template. |
+
+> The old *Translation Table* mode was retired in favour of Inline Replace +
+> hover tooltips (which preserves surrounding SQL context) and the Schema
+> Browser (`Ctrl+B`, or `Ctrl+Shift+B` to scope it to the names in your
+> current input).
 
 ### Direction switching
 
@@ -48,6 +52,7 @@ control); copy the sample to bootstrap a fresh clone.
 
 ### Built-in helpers
 
+- **🛠 Extract SQL from log…** (topbar button + `Ctrl+Shift+L`) — point at a `stclibApp.log`, browse every prepared statement grouped by user action, with the 1–2 primary business queries surfaced above infrastructure noise. The Result tab shows the SQL with `?` placeholders filled in from bound params, prettified, syntax-highlighted, and with bound values visually called out. Sortable columns; statement-type chips; auto-reload on file change; one click sends the runnable SQL into the translator's input so Inline Replace / Design Doc render against real values.
 - **⚙ Filter** — multi-select schemas *and* tables. Tables list scopes to the selected schemas, hover tooltips respect the filter, and the menu label always reflects the active scope (e.g. `all 87 T` when nothing is checked). Custom entries (see User Map) always bypass filters.
 - **⊘ Exclusions** — strings that must be preserved as-is. Right-click any selection to add/remove. Whole-word matching for identifiers; substring for Japanese labels.
 - **🖉 User Map** — hand-curated `physical ↔ logical` overrides that win against the JSON. Edit in a table UI or in the raw `translator_custom_map.json` file.
@@ -82,13 +87,16 @@ control); copy the sample to bootstrap a fresh clone.
 │   ├── paths.py               file locations + constants
 │   ├── themes.py              dark / light palettes
 │   ├── config.py              settings / history / exclusions / user-map I/O
-│   ├── schema.py              JSON index + filters
-│   ├── translate.py           table/inline translate (both directions)
+│   ├── schema.py              JSON index + filters + table_column_order
+│   ├── translate.py           inline translate (both directions)
 │   ├── designdoc.py           Java → SQL parser + design-doc emitter
+│   ├── logsql.py              stclibApp.log parser + score + pretty_sql
 │   └── ui/
 │       ├── widgets.py         LineNumberCanvas, Tooltip, Toast
 │       ├── app.py             TranslatorApp main window
-│       └── dialogs/           user-map, filter, inconsistency, sections, exclusions, help
+│       └── dialogs/           filter, exclusions, user_map, inconsistency,
+│                              sections, schema_browser, snippets, inspect,
+│                              command_palette, log_sql, help
 ├── tests/                     pytest suite for pure-logic modules
 ├── assets/
 │   ├── image.ico              application icon

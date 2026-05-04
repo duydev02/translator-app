@@ -18,13 +18,22 @@ RevColumnIndex = dict[str, list[tuple[str, str, str, str]]]
 # ── Index loading ─────────────────────────────────────────────────────────────
 def load_index(
     json_file: str,
-) -> tuple[TableIndex, ColumnIndex, RevTableIndex, RevColumnIndex, list[str]]:
-    """Return (table_index, column_index, rev_table_index, rev_column_index, schemas)."""
+) -> tuple[TableIndex, ColumnIndex, RevTableIndex, RevColumnIndex, list[str], dict[str, list[str]]]:
+    """Return (table_index, column_index, rev_table_index, rev_column_index,
+    schemas, table_column_order).
+
+    `table_column_order` maps phys_table → list of phys_col names in JSON
+    declaration order (i.e. the same order as in the source DB schema).
+    If a phys_table appears under multiple schemas, columns from later
+    schemas are appended after the first schema's order, deduped — so the
+    Schema Browser can show columns in their natural definition order
+    instead of forcing A–Z."""
     with open(json_file, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     table_index, column_index = {}, {}
     rev_table_index, rev_column_index = {}, {}
+    table_column_order: dict[str, list[str]] = {}
     # Skip top-level non-dict values (e.g. the "__comment__" key in the sample
     # schema). Only real schema entries map to a dict of tables.
     schemas = [k for k, v in data.items() if isinstance(v, dict)]
@@ -38,7 +47,12 @@ def load_index(
             if logical_table and logical_table != phys_table:
                 rev_table_index.setdefault(logical_table, []).append((schema, phys_table))
 
+            order_list = table_column_order.setdefault(phys_table, [])
+            seen_in_order = set(order_list)
             for phys_col, logical_col in tdata["columns"].items():
+                if phys_col not in seen_in_order:
+                    order_list.append(phys_col)
+                    seen_in_order.add(phys_col)
                 column_index.setdefault(phys_col, []).append(
                     (schema, phys_table, logical_table, logical_col)
                 )
@@ -46,7 +60,10 @@ def load_index(
                     rev_column_index.setdefault(logical_col, []).append(
                         (schema, phys_table, logical_table, phys_col)
                     )
-    return table_index, column_index, rev_table_index, rev_column_index, schemas
+    return (
+        table_index, column_index, rev_table_index, rev_column_index,
+        schemas, table_column_order,
+    )
 
 
 def merge_user_map(

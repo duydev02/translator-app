@@ -26,6 +26,9 @@ translator_custom_map.json
 translator_exclusions.txt
 translator_history.txt
 translator_settings.json
+# Sample log used during local development; real production logs contain
+# customer data and shouldn't end up in version control.
+stclibApp.log
 
 # ── IDE / editor ──────────────────────────────────────────────────────────────
 .vscode/

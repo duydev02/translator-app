@@ -33,8 +33,6 @@ from ..translate import (
     find_unknown_tokens,
     translate_inline_mode,
     translate_reverse_inline_mode,
-    translate_reverse_table_mode,
-    translate_table_mode,
 )
 from .widgets import (
     _BaseTk,
@@ -63,7 +61,12 @@ class TranslatorApp(_BaseTk):
 
         # Mutable state (persisted in settings)
         self._theme       = self._settings.get("theme", "light")
-        self._mode        = tk.StringVar(value=self._settings.get("mode", "inline"))
+        # Translation Table mode was retired — anything saved as "table" falls
+        # back to Inline Replace, which strictly dominates the old view.
+        _saved_mode = self._settings.get("mode", "inline")
+        if _saved_mode == "table":
+            _saved_mode = "inline"
+        self._mode        = tk.StringVar(value=_saved_mode)
         self._direction   = tk.StringVar(value=self._settings.get("direction", "forward"))
         self._filter_schemas = set(self._settings.get("filter_schemas", []))   # empty = all
         self._filter_tables  = set(self._settings.get("filter_tables",  []))   # empty = all
@@ -106,10 +109,13 @@ class TranslatorApp(_BaseTk):
         for d in saved_tabs:
             if not isinstance(d, dict):
                 continue
+            tab_mode = d.get("mode") or self._mode.get()
+            if tab_mode == "table":  # migrate retired Translation Table mode
+                tab_mode = "inline"
             self._doctabs.append({
                 "title":        d.get("title") or "",
                 "input":        d.get("input") or "",
-                "mode":         d.get("mode") or self._mode.get(),
+                "mode":         tab_mode,
                 "direction":    d.get("direction") or self._direction.get(),
                 "manual_title": bool(d.get("manual_title", False)),
             })
@@ -197,6 +203,12 @@ class TranslatorApp(_BaseTk):
         # Schema Browser / Snippets quick-access
         self.bind_all("<Control-b>",          lambda e: self.open_schema_browser())
         self.bind_all("<Command-b>",          lambda e: self.open_schema_browser())
+        # Ctrl+Shift+B: open Schema Browser pre-filtered to names found in input
+        self.bind_all("<Control-Shift-B>",    lambda e: self.open_schema_browser_for_input())
+        self.bind_all("<Command-Shift-B>",    lambda e: self.open_schema_browser_for_input())
+        # Ctrl+Shift+L: 🛠 Extract SQL from log… (Ctrl+L alone toggles line numbers)
+        self.bind_all("<Control-Shift-L>",    lambda e: self.open_log_sql_dialog())
+        self.bind_all("<Command-Shift-L>",    lambda e: self.open_log_sql_dialog())
         self.bind_all("<Control-j>",          lambda e: self.open_snippets_dialog())
         self.bind_all("<Command-j>",          lambda e: self.open_snippets_dialog())
         self.bind_all("<Control-t>",          lambda e: self._new_doc_tab())
@@ -290,7 +302,7 @@ class TranslatorApp(_BaseTk):
 
     # ── Data loading ──────────────────────────────────────────────────────────
     def _load_data(self):
-        ti, ci, rti, rci, schemas = load_index(self._json_path)
+        ti, ci, rti, rci, schemas, tco = load_index(self._json_path)
         self._user_map = load_user_map()
         merge_user_map(ti, ci, rti, rci, self._user_map)
 
@@ -298,6 +310,10 @@ class TranslatorApp(_BaseTk):
         self.column_index     = ci
         self.rev_table_index  = rti
         self.rev_column_index = rci
+        # phys_table → list of phys_cols in JSON declaration order. Used by
+        # the Schema Browser so columns of a selected table render in their
+        # natural DB definition order instead of being forced A–Z.
+        self.table_column_order = tco
         # CUSTOM_SCHEMA is exposed in the filter dropdown if user has any overrides
         self.schemas = list(schemas)
         if (self._user_map.get("tables") or self._user_map.get("columns")):
@@ -315,15 +331,10 @@ class TranslatorApp(_BaseTk):
         self._tab_frame.pack(side="left", padx=12, pady=8)
         tab_frame = self._tab_frame
 
-        self._tab_table = tk.Button(tab_frame, text="Translation Table",
-            font=self._ui_b, relief="flat", padx=14, pady=4, cursor="hand2", bd=0,
-            command=lambda: self._set_mode("table"))
-        self._tab_table.pack(side="left")
-
         self._tab_inline = tk.Button(tab_frame, text="Inline Replace",
             font=self._ui_b, relief="flat", padx=14, pady=4, cursor="hand2", bd=0,
             command=lambda: self._set_mode("inline"))
-        self._tab_inline.pack(side="left", padx=(2, 0))
+        self._tab_inline.pack(side="left")
 
         self._tab_designdoc = tk.Button(tab_frame, text="Design Doc",
             font=self._ui_b, relief="flat", padx=14, pady=4, cursor="hand2", bd=0,
@@ -414,6 +425,17 @@ class TranslatorApp(_BaseTk):
             command=self.on_reload_json,
         )
         self._settings_btn.pack(side="right", pady=8)
+
+        # ── 🛠 Extract SQL — direct button on the topbar ────────────────
+        # The log-extractor is the main developer utility and gets opened
+        # constantly during debugging, so it earns a dedicated single-click
+        # button instead of living behind a Tools menu. If more
+        # developer tools land later, convert this back into a menubutton
+        # with submenu entries (see git history for the previous shape).
+        self._tools_btn = tk.Button(self._topbar, text="🛠  Extract SQL",
+            font=self._ui_b, relief="flat", padx=12, pady=4, cursor="hand2", bd=0,
+            command=self.open_log_sql_dialog)
+        self._tools_btn.pack(side="right", padx=(0, 6), pady=8)
 
         # ── Doc-tab bar (multi-input) ────────────────────────────────────────
         self._doctabs_bar = tk.Frame(self, height=30)
@@ -697,7 +719,7 @@ class TranslatorApp(_BaseTk):
             activebackground=t["accent"], activeforeground=t["accent_fg"])
         for btn in (self._copy_btn, self._save_btn, self._inspect_btn,
                     self._help_btn, self._history_btn,
-                    self._settings_btn,
+                    self._settings_btn, self._tools_btn,
                     self._doctabs_newbtn,
                     *self._small_buttons):
             btn.configure(bg=t["muted_bg"], fg=t["muted_fg"],
@@ -1103,6 +1125,9 @@ class TranslatorApp(_BaseTk):
 
     # ── Mode / direction / schema ─────────────────────────────────────────────
     def _set_mode(self, mode):
+        # Translation Table mode was retired — silently coerce to Inline.
+        if mode == "table":
+            mode = "inline"
         self._mode.set(mode)
         self._refresh_mode_tabs()
         self.on_translate()
@@ -1327,7 +1352,8 @@ class TranslatorApp(_BaseTk):
         entry.bind("<Escape>", cancel)
 
     def toggle_mode(self):
-        self._set_mode("table" if self._mode.get() == "inline" else "inline")
+        # Translation Table was retired — Ctrl+M now toggles Inline ↔ Design Doc.
+        self._set_mode("designdoc" if self._mode.get() == "inline" else "inline")
 
     def toggle_direction(self):
         self._set_direction("reverse" if self._direction.get() == "forward" else "forward")
@@ -1342,7 +1368,6 @@ class TranslatorApp(_BaseTk):
                 btn.configure(bg=t["muted_bg"], fg=t["fg_muted"],
                     activebackground=t["muted_bg"], activeforeground=t["fg_muted"])
         mode = self._mode.get()
-        style(self._tab_table,     mode == "table")
         style(self._tab_inline,    mode == "inline")
         style(self._tab_designdoc, mode == "designdoc")
         style(self._tab_forward, self._direction.get() == "forward")
@@ -1465,33 +1490,24 @@ class TranslatorApp(_BaseTk):
             return
 
         ctx = self._table_context
+        # `mode` is only ever "inline" here (Design Doc returned earlier;
+        # Translation Table was retired). Keep the branch on direction.
         if direction == "forward":
-            if mode == "table":
-                result = translate_table_mode(text, self.table_index, self.column_index,
-                                              schemas=schemas, tables=tables, table_context=ctx)
-                unknown = find_unknown_tokens(text, self.table_index, self.column_index, self._exclusions)
-                self._render_table(result, unknown)
-            else:
-                translated, rmap, spans = translate_inline_mode(
-                    text, self.table_index, self.column_index, self._exclusions,
-                    schemas=schemas, tables=tables, table_context=ctx)
-                unknown = find_unknown_tokens(text, self.table_index, self.column_index, self._exclusions)
-                self._spans = spans
-                self._render_inline(translated, unknown)
+            translated, rmap, spans = translate_inline_mode(
+                text, self.table_index, self.column_index, self._exclusions,
+                schemas=schemas, tables=tables, table_context=ctx)
+            unknown = find_unknown_tokens(text, self.table_index, self.column_index, self._exclusions)
+            self._spans = spans
+            self._render_inline(translated, unknown)
             tokens = _tokens(text)
             n_t = sum(1 for t in tokens if t in self.table_index)
             n_c = sum(1 for t in tokens if t in self.column_index)
         else:
-            if mode == "table":
-                result = translate_reverse_table_mode(text, self.rev_table_index, self.rev_column_index,
-                                                      schemas=schemas, tables=tables, table_context=ctx)
-                self._render_table(result, [])
-            else:
-                translated, rmap, spans = translate_reverse_inline_mode(
-                    text, self.rev_table_index, self.rev_column_index, self._exclusions,
-                    schemas=schemas, tables=tables, table_context=ctx)
-                self._spans = spans
-                self._render_inline(translated, [])
+            translated, rmap, spans = translate_reverse_inline_mode(
+                text, self.rev_table_index, self.rev_column_index, self._exclusions,
+                schemas=schemas, tables=tables, table_context=ctx)
+            self._spans = spans
+            self._render_inline(translated, [])
             found = _find_logical_tokens(text, self.rev_table_index, self.rev_column_index)
             n_t = sum(1 for _, is_t in found if is_t)
             n_c = sum(1 for _, is_t in found if not is_t)
@@ -1957,30 +1973,6 @@ class TranslatorApp(_BaseTk):
             return self.output_box.get("1.0", ranges[0]).rstrip("\n")
         return self.output_box.get("1.0", tk.END).rstrip("\n")
 
-    def _render_table(self, text, unknown=None):
-        self.output_box.configure(state="normal")
-        self.output_box.delete("1.0", tk.END)
-        for line in text.splitlines(keepends=True):
-            if line.startswith("━"):
-                self.output_box.insert(tk.END, line, "header")
-            elif line.startswith("  ") and "→" not in line and line.strip():
-                self.output_box.insert(tk.END, line, "physical")
-            elif "→" in line:
-                idx = line.index("→")
-                self.output_box.insert(tk.END, line[:idx + 1], "logical")
-                rest = line[idx + 1:]
-                b = rest.find("[")
-                if b != -1:
-                    self.output_box.insert(tk.END, rest[:b], "logical")
-                    self.output_box.insert(tk.END, rest[b:], "meta")
-                else:
-                    self.output_box.insert(tk.END, rest, "logical")
-            else:
-                self.output_box.insert(tk.END, line)
-
-        self._append_unknown_section(unknown)
-        self.output_box.configure(state="disabled")
-
     def _render_inline(self, translated_text, unknown=None):
         self.output_box.configure(state="normal")
         self.output_box.delete("1.0", tk.END)
@@ -2264,6 +2256,8 @@ class TranslatorApp(_BaseTk):
             menu.add_command(label="✕  Clear input  (Ctrl+⌫)", command=self.on_clear)
             menu.add_command(label="📋  Save as snippet…",      command=self.open_snippets_dialog)
             menu.add_command(label="📂  Open file…",             command=self.on_open_file)
+            menu.add_command(label="🛠  Extract SQL from log…  (Ctrl+Shift+L)",
+                             command=self.open_log_sql_dialog)
 
         menu.add_separator()
         menu.add_command(label="Open exclusion list…", command=self.open_exclusions_dialog)
@@ -2449,6 +2443,29 @@ class TranslatorApp(_BaseTk):
         from .dialogs.schema_browser import open_schema_browser
         open_schema_browser(self)
 
+    def open_log_sql_dialog(self):
+        """🛠 Tools → Extract SQL from log… (Ctrl+Shift+L)"""
+        from .dialogs.log_sql import open_log_sql_dialog
+        open_log_sql_dialog(self)
+
+    def open_schema_browser_for_input(self):
+        """Open Schema Browser pre-filtered to physical names found in the
+        current input (Ctrl+Shift+B). Replaces the old Translation Table
+        mode's "list every name in this paste" use case."""
+        from .dialogs.schema_browser import open_schema_browser
+        text = self._current_input()
+        # Collect uppercase tokens that exist in either index — the same
+        # vocabulary the inline translator considers.
+        names = {
+            t for t in _tokens(text)
+            if t in self.table_index or t in self.column_index
+        }
+        if not names:
+            self._toast.show("No known names in input", 1200, "info")
+            open_schema_browser(self)
+            return
+        open_schema_browser(self, name_filter=names)
+
     def open_snippets_dialog(self):
         from .dialogs.snippets import open_snippets_dialog
         open_snippets_dialog(self)
@@ -2482,12 +2499,12 @@ class TranslatorApp(_BaseTk):
 
     def _install_button_tooltips(self):
         pairs = [
-            (self._tab_table,    "Show original on the left and the translation on the right (Translation Table mode)"),
             (self._tab_inline,   "Replace identifiers in place inside the original text (Inline Replace mode)"),
             (self._tab_designdoc,"Generate a structured Japanese design document from SQL (Design Doc mode)"),
             (self._tab_forward,  "Translate physical → logical names"),
             (self._tab_reverse,  "Translate logical → physical names"),
             (self._settings_btn, "Theme, layout, filter, exclusions, user map, file operations"),
+            (self._tools_btn,    "Extract SQL from log: parse stclibApp.log, fill ?-placeholders with bound params (Ctrl+Shift+L)"),
             (self._help_btn,     "Help & keyboard shortcuts (F1)"),
             (self._translate_btn,"Translate the input (Ctrl+Enter)"),
             (self._copy_btn,     "Copy output to clipboard (Ctrl+Shift+C)"),

@@ -5,20 +5,11 @@ from translator_app.translate import (
     find_unknown_tokens,
     translate_inline_mode,
     translate_reverse_inline_mode,
-    translate_reverse_table_mode,
-    translate_table_mode,
 )
 
 
-def test_translate_table_mode_forward(sample_index):
-    table_index, column_index, _, _, _ = sample_index
-    out = translate_table_mode("R_SYOHIN SYOHIN_CD", table_index, column_index)
-    assert "商品マスタ" in out
-    assert "商品コード" in out
-
-
 def test_translate_inline_mode_preserves_surrounding_text(sample_index):
-    table_index, column_index, _, _, _ = sample_index
+    table_index, column_index, _, _, _, _ = sample_index
     text = "SELECT SYOHIN_CD FROM R_SYOHIN WHERE X = 1"
     out, rmap, _ = translate_inline_mode(text, table_index, column_index)
     assert "SELECT" in out  # surrounding keyword preserved (not in index)
@@ -27,14 +18,8 @@ def test_translate_inline_mode_preserves_surrounding_text(sample_index):
     assert rmap["R_SYOHIN"] == "商品マスタ"
 
 
-def test_translate_reverse_table_mode(sample_index):
-    _, _, rev_table_index, rev_column_index, _ = sample_index
-    out = translate_reverse_table_mode("商品マスタ", rev_table_index, rev_column_index)
-    assert "R_SYOHIN" in out
-
-
 def test_translate_inline_mode_exclusion_preserves_token(sample_index):
-    table_index, column_index, _, _, _ = sample_index
+    table_index, column_index, _, _, _, _ = sample_index
     text = "R_SYOHIN SYOHIN_CD"
     out, _, _ = translate_inline_mode(
         text, table_index, column_index, exclusions=["R_SYOHIN"]
@@ -59,7 +44,7 @@ def test_exclusion_ranges_reports_character_ranges():
 
 
 def test_find_unknown_tokens(sample_index):
-    table_index, column_index, _, _, _ = sample_index
+    table_index, column_index, _, _, _, _ = sample_index
     text = "R_SYOHIN UNKNOWN_COL XYZ_T"
     unknown = find_unknown_tokens(text, table_index, column_index)
     assert "UNKNOWN_COL" in unknown
@@ -87,7 +72,7 @@ def test_find_column_inconsistencies():
 
 
 def test_translate_reverse_inline_mode(sample_index):
-    _, _, rev_table_index, rev_column_index, _ = sample_index
+    _, _, rev_table_index, rev_column_index, _, _ = sample_index
     out, rmap, _ = translate_reverse_inline_mode(
         "商品マスタの商品コードを取得", rev_table_index, rev_column_index
     )

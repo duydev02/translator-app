@@ -2,12 +2,6 @@
 
 ## Modes
 
-### Translation Table
-Structured listing. Every physical name found in the input is shown with:
-- its logical (Japanese) equivalent
-- every schema / table it lives in
-- a `⚠` marker if it has multiple different logical names (see *Inconsistency detector*)
-
 ### Inline Replace
 Same text you pasted, with physical names substituted in-place. Each replaced
 name is **underlined** and carries a hover tooltip:
@@ -125,6 +119,144 @@ so you can flip several sections without reopening. Closes on click-outside
 or `Esc`.
 
 Covers every `■` block and the `【SQL論理名】 / 【SQL定義名】` header lines.
+
+---
+
+## Schema Browser (Ctrl+B)
+
+Searchable two-pane window for looking up tables and columns without leaving
+the app. Tables on the left, columns of the selected table on the right
+(both physical *and* logical names side-by-side).
+
+- **Per-pane search**: `🔎 tables` filters only the Tables tree;
+  `🔎 columns` filters only the Columns tree — they don't fight each other,
+  so picking R_SYOHIN and then typing a column name works as expected.
+- **Show all** (next to the columns search) clears the table selection so
+  the global column list comes back.
+- **Column order**: when a table is selected, columns are listed in their
+  **JSON declaration order** (i.e. the same order as in `db_schema_output.json`),
+  not A–Z, so the view matches the actual DB definition.
+- **Esc** inside a search box clears it before falling through to closing
+  the dialog.
+- **Ctrl+Shift+B** opens it scoped to names found in the current input.
+  A "Showing only N name(s) found in input" banner appears at the top with
+  a *Clear filter* button. The Tables pane shrinks to those tables and the
+  global Columns view shrinks to those columns. This replaces the old
+  *Translation Table* mode's "list every name in this paste" view —
+  with sortable columns, search, and copy actions on top.
+- Buttons: **Copy physical**, **Copy logical**, **Override logical name…**
+  (opens a small prompt prefilled with the current logical name; saves to
+  `translator_custom_map.json` and re-runs translation immediately — the
+  override always wins against `db_schema_output.json`), **Close**.
+
+---
+
+## 🛠 Extract SQL from log… (`Ctrl+Shift+L`)
+
+A dedicated button on the topbar next to *⚙ Settings* opens this — the
+log-extractor is the most-used dev utility so it earns a single-click
+home rather than living in a menu.
+
+Reads a `stclibApp.log` produced by `commons.dao.PreparedStatementEx`,
+parses **every** prepared statement it contains, surfaces the 1–2
+*primary* business queries above the dozens of infrastructure calls
+(SystemControl reads, audit-log inserts, message lookups…), and
+substitutes `?` placeholders with the bound parameters to give you a
+runnable SQL.
+
+#### Browsing a log
+
+- **Log chips**: each recent path shows as a small button at the top of
+  the dialog (label = the last 2 path segments, e.g.
+  `…/mdw_lawmasterhansoku-web/log`). The active chip is highlighted —
+  one click swaps the active log instantly. Right-click a chip for
+  *Remove from list* / *Open containing folder*. **+ Add log** opens a
+  file picker; up to 8 chips are kept.
+- **↻ Reload** force re-parses the active log right now.
+- **☑ Auto** (default ON) watches the active log file's mtime in the
+  background while the dialog is open — any change re-parses
+  automatically (~1.5 s lag) and a quick toast pops up so you know it
+  happened. Untick when you want full manual control.
+- The **statement list** is grouped under the user request that
+  triggered each batch — you'll see something like
+  *`PdaHonbuIdoShijiTorikomiAction#search  (9 queries · 3 ★)`*. The
+  grouping uses `commons.struts.RequestProcessor,callMethod` markers
+  when present, falling back to 1-second time gaps for orphan
+  statements.
+- Statements are tagged **★ primary** when their score crosses the
+  threshold (default 30). Score combines: DAO package match
+  (signal/noise lists), SQL length, `WITH` / `JOIN` / `UNION`
+  presence, bound-param count, target-table noise list.
+- **🔎 search box**: filters by id, DAO short name, statement type,
+  target tables, or substring of the SQL.
+- **☑ Hide infrastructure** (default ON): only ★-primary statements
+  show. Untick to see everything (every audit insert, every config
+  read).
+- **Click a statement** → its **Result (filled)**, then **SQL (with
+  ?)**, then **Params** tabs render below. Result is the first tab
+  because it's the one you usually want; the SQL in that tab is also
+  *prettified* — line breaks at major clauses (SELECT / FROM / WHERE /
+  ORDER BY / GROUP BY / HAVING / UNION / WITH / VALUES …), each JOIN
+  and AND/OR indented under its parent. The first ★-primary statement
+  is auto-selected after each load so you usually need zero clicks.
+- **Result pane highlights**: SQL keywords, string literals, numbers,
+  and comments render in distinct theme-aware colors. **Values that
+  came from bound parameters** (the substitutions for each `?`) get
+  their own accent + tint so you can see at a glance what came from
+  the original SQL vs what the JDBC driver bound — even when the
+  bound value is itself a string literal.
+- **Sort by any column**: click the `Time` / `ID` / `DAO` / `Type` /
+  `Tables` / `?` / `Score` headers to sort statements *within* each
+  user-action group (the grouping itself is preserved). A `▼` / `▲`
+  arrow shows the current direction; click again to flip.
+- **Statement-type chips**: a second row of toggles next to the
+  search box — `SELECT / INSERT / UPDATE / DELETE / OTHER` plus
+  `All` / `None` shortcuts. Untick types you don't care about right
+  now; remembered per project across sessions.
+- **Result tab toolbar** — `📋 Copy` puts the prettified SQL on the
+  clipboard. `☑ Auto-copy` makes every selection auto-copy
+  immediately so you can click a row and just paste into your DB
+  tool — no second click. Toggling Auto-copy on with a statement
+  already selected copies it right away.
+
+#### Defaults (per project, editable in `translator_settings.json`)
+
+- `noise_packages`: `["swc.commons", "mdware.common"]` — DAOs whose
+  package contains either of these are demoted (-80).
+- `noise_tables`: `["SYSTEM_CONTROL", "DT_TABLE_LOG", "R_MESSAGE",
+  "R_DICTIONARY_CONTROL", "R_NAMECTF"]` — statements targeting these
+  are demoted (-40).
+- `primary_packages`: empty by default. When set (e.g.
+  `["mdware.shiire", "mdware.lawmaster"]`), DAOs in those packages
+  get a strong **+50** boost — useful when you're working across
+  multiple sub-projects and want a single config to recognise them
+  all.
+- `primary_threshold`: 30. Lower it if you want more queries flagged
+  as primary; raise it for stricter filtering.
+
+#### Result actions
+
+- **Copy result**: clipboard, ready to paste into your DB tool.
+- **Send to translator input**: replaces the active doc tab's input
+  with the runnable SQL and re-runs translation immediately, so
+  Inline Replace or Design Doc renders the Japanese names against
+  real values.
+
+#### Direct mode
+
+A **Direct mode…** button swaps the body for a 3-pane view (paste SQL
+on the left, paste `[STRING:1:…]` blob in the middle, click Process to
+fill the result on the right). Useful when you don't have the log file
+handy — e.g. someone messaged you a snippet on chat. Same combiner.
+
+#### Param formatter
+
+Recognised types: `STRING` / `CHAR` / `VARCHAR` / `CLOB` (single-quoted
+with `''` escaping); `INT` / `BIGINT` / `DECIMAL` / `DOUBLE` / `FLOAT`
+(bare); `DATE` / `TIMESTAMP` / `TIME` (quoted); `NULL` (keyword);
+`BOOLEAN` (1/0); `BYTES` / `BLOB` (hex). Unknown types fall back to
+single-quoted strings. Substitution is quote-aware — `?` inside a
+string literal (e.g. `'O''Brien?'`) is left alone.
 
 ---
 

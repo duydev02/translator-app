@@ -173,8 +173,6 @@ def _collect_commands(app):
 
     # ── Mode / direction
     try:
-        add("Switch mode: Translation Table",
-            lambda: app._set_mode("table"), "Mode")
         add("Switch mode: Inline Replace",
             lambda: app._set_mode("inline"), "Mode")
         add("Switch mode: Design Doc",
@@ -219,6 +217,12 @@ def _collect_commands(app):
     add("Open User Map…",          app.open_user_map_dialog,       "Dialog")
     try:
         add("Open Schema Browser…", app.open_schema_browser,        "Dialog")
+        add("Open Schema Browser scoped to input names…",
+            app.open_schema_browser_for_input,                       "Dialog")
+    except Exception:
+        pass
+    try:
+        add("Extract SQL from log…", app.open_log_sql_dialog,       "Tool")
     except Exception:
         pass
     try:
