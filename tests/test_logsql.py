@@ -11,11 +11,15 @@ import pytest
 from translator_app.logsql import (
     DEFAULT_NOISE_PACKAGES,
     DEFAULT_NOISE_TABLES,
+    SUBST_CLOSE,
+    SUBST_OPEN,
     Statement,
     annotate_scores,
     combine_sql_params,
+    combine_sql_params_marked,
     count_placeholders,
     extract_statement_type,
+    extract_subst_ranges,
     extract_target_tables,
     find_entry_by_id,
     find_last_entry,
@@ -23,7 +27,9 @@ from translator_app.logsql import (
     group_by_action,
     parse_log,
     parse_params,
+    pretty_sql,
     score_statement,
+    tokenize_sql_for_highlight,
 )
 
 
@@ -403,6 +409,53 @@ def test_group_by_action_keeps_init_order_within_a_group():
 
 
 # ── back-compat: old find_entry_by_id shape still works ─────────────────────
+# ── pretty_sql ────────────────────────────────────────────────────────────────
+def test_pretty_sql_breaks_major_clauses():
+    sql = "SELECT A, B FROM T WHERE X = 1 ORDER BY A"
+    out = pretty_sql(sql)
+    lines = out.splitlines()
+    # Each top-level clause should land on its own line.
+    assert any(l.startswith("SELECT") for l in lines)
+    assert any(l.startswith("FROM")   for l in lines)
+    assert any(l.startswith("WHERE")  for l in lines)
+    assert any(l.startswith("ORDER BY") for l in lines)
+
+
+def test_pretty_sql_indents_joins_and_connectives():
+    sql = "SELECT * FROM A LEFT JOIN B ON A.X = B.X AND A.Y = B.Y WHERE A.Z = 1"
+    out = pretty_sql(sql)
+    # JOINs are indented two spaces, AND/OR four spaces.
+    assert "\n  LEFT JOIN" in out
+    assert "\n    AND" in out
+
+
+def test_pretty_sql_preserves_string_literals():
+    """A keyword like FROM that lives inside a string literal must not be
+    broken across lines — only the real keywords are."""
+    sql = "SELECT 'WHERE I LIVE' AS LBL FROM T WHERE A = 1"
+    out = pretty_sql(sql)
+    assert "'WHERE I LIVE'" in out
+    assert any(l.startswith("WHERE A") for l in out.splitlines())
+
+
+def test_pretty_sql_preserves_first_token():
+    """The leading SELECT shouldn't get a leading newline (cosmetic)."""
+    out = pretty_sql("SELECT 1 FROM T")
+    assert not out.startswith("\n")
+
+
+def test_pretty_sql_handles_empty_input():
+    assert pretty_sql("") == ""
+
+
+def test_pretty_sql_does_not_break_into_substrings():
+    """`INTO` keyword should not match inside `IDOSAKI_TENPO_CD` etc."""
+    sql = "SELECT IDOSAKI_TENPO_CD FROM TBL WHERE IDOSAKI_TENPO_CD = 1"
+    out = pretty_sql(sql)
+    assert "IDOSAKI_TENPO_CD" in out
+    assert "IDOSAKI\nTENPO_CD" not in out
+
+
 def test_find_entry_by_id_back_compat_dict_shape():
     """The dict shape old callers expect: {id, sql, params_raw, params,
     fqcn, result}. Now produced by parse_log + Statement.as_dict, but the
@@ -411,3 +464,92 @@ def test_find_entry_by_id_back_compat_dict_shape():
     assert e is not None
     for k in ("id", "sql", "params_raw", "params", "fqcn", "result"):
         assert k in e, f"missing key: {k}"
+
+
+# ── tokenize_sql_for_highlight ────────────────────────────────────────────────
+def test_tokenize_sql_for_highlight_classifies_basic_tokens():
+    sql = "SELECT 'hello', 42 FROM T -- a comment"
+    toks = tokenize_sql_for_highlight(sql)
+    kinds = {kind for _, _, kind in toks}
+    assert kinds == {"keyword", "string", "number", "comment"}
+    # Ranges line up with the source.
+    for s, e, kind in toks:
+        if kind == "string":
+            assert sql[s:e] == "'hello'"
+        if kind == "number":
+            assert sql[s:e] == "42"
+        if kind == "comment":
+            assert sql[s:e].startswith("--")
+
+
+def test_tokenize_sql_for_highlight_detects_block_comment_across_newlines():
+    sql = "SELECT /* multi\nline */ 1 FROM T"
+    toks = tokenize_sql_for_highlight(sql)
+    comments = [(s, e) for s, e, k in toks if k == "comment"]
+    assert len(comments) == 1
+    s, e = comments[0]
+    assert sql[s:e].startswith("/*") and sql[s:e].endswith("*/")
+
+
+def test_tokenize_sql_for_highlight_does_not_flag_identifiers_as_keywords():
+    """`SYOHIN_CD` looks like a word but isn't a SQL keyword — it must
+    not pick up the keyword tag (otherwise nearly every column name would
+    light up)."""
+    sql = "SELECT SYOHIN_CD FROM TBL"
+    keyword_tokens = [
+        sql[s:e] for s, e, kind in tokenize_sql_for_highlight(sql)
+        if kind == "keyword"
+    ]
+    assert keyword_tokens == ["SELECT", "FROM"]
+
+
+def test_tokenize_sql_for_highlight_handles_empty_input():
+    assert tokenize_sql_for_highlight("") == []
+
+
+# ── combine_sql_params_marked + extract_subst_ranges round-trip ──────────────
+def test_combine_sql_params_marked_wraps_substitutions():
+    marked, _ = combine_sql_params_marked(
+        "SELECT * FROM T WHERE A = ?",
+        [("STRING", "x")],
+    )
+    assert SUBST_OPEN in marked and SUBST_CLOSE in marked
+    # The wrapped value is the formatted literal.
+    assert SUBST_OPEN + "'x'" + SUBST_CLOSE in marked
+
+
+def test_extract_subst_ranges_round_trip_recovers_clean_text_and_offsets():
+    marked, _ = combine_sql_params_marked(
+        "SELECT * FROM T WHERE A = ? AND B = ?",
+        [("STRING", "foo"), ("INT", "42")],
+    )
+    clean, ranges = extract_subst_ranges(marked)
+    # Clean text has no sentinels; offsets point at substituted spans.
+    assert SUBST_OPEN not in clean and SUBST_CLOSE not in clean
+    assert len(ranges) == 2
+    assert clean[ranges[0][0]:ranges[0][1]] == "'foo'"
+    assert clean[ranges[1][0]:ranges[1][1]] == "42"
+
+
+def test_subst_ranges_survive_pretty_sql_round_trip():
+    """The whole point of the sentinel dance: pretty_sql changes char
+    offsets, but extract_subst_ranges in the cleaned post-pretty text
+    still points at the right runs."""
+    marked, _ = combine_sql_params_marked(
+        "SELECT * FROM T WHERE A = ? AND B = ?",
+        [("STRING", "foo"), ("INT", "42")],
+    )
+    pretty = pretty_sql(marked)
+    clean, ranges = extract_subst_ranges(pretty)
+    assert "\nWHERE" in clean       # pretty_sql ran
+    assert clean[ranges[0][0]:ranges[0][1]] == "'foo'"
+    assert clean[ranges[1][0]:ranges[1][1]] == "42"
+
+
+def test_extract_subst_ranges_drops_unbalanced_sentinels_safely():
+    # Defensive: a stray open sentinel shouldn't crash, just yield no
+    # range for it (and the orphan char gets stripped).
+    text = "abc" + SUBST_OPEN + "xyz"   # no close
+    clean, ranges = extract_subst_ranges(text)
+    assert clean == "abcxyz"
+    assert ranges == []

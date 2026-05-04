@@ -311,6 +311,15 @@ def _mask_string_literals(sql: str) -> str:
     return _STRING_LITERAL_RE.sub(_repl, sql)
 
 
+# Sentinel chars used by combine_sql_params_marked() to delimit substituted
+# values inside the produced text. Chosen from the ASCII control range so
+# pretty_sql's whitespace handling and the dialog's text rendering pass them
+# through verbatim, and they're vanishingly unlikely to appear in real SQL
+# or in bound param values.
+SUBST_OPEN  = "\x01"   # start of a substituted run
+SUBST_CLOSE = "\x02"   # end of a substituted run
+
+
 def combine_sql_params(sql: str, params: list[tuple[str, str]]) -> str:
     """Substitute positional `?` placeholders in `sql` with formatted
     values from `params`. `?` inside string literals is left alone.
@@ -340,6 +349,242 @@ def combine_sql_params(sql: str, params: list[tuple[str, str]]) -> str:
         last = off + 1
     out.append(sql[last:])
     return "".join(out)
+
+
+def combine_sql_params_marked(
+    sql: str, params: list[tuple[str, str]],
+) -> tuple[str, list[tuple[int, int]]]:
+    """Like `combine_sql_params`, but records where each substituted value
+    lives in the output. Returns `(text_with_sentinels, [(start, end)])`.
+
+    Sentinels (`SUBST_OPEN` / `SUBST_CLOSE`) wrap each substituted run in
+    the returned text. Callers should pass that text through `pretty_sql`
+    (sentinels survive — pretty_sql treats them as ordinary chars), then
+    call `extract_subst_ranges()` to strip them and recover the final
+    `(clean_text, ranges)` so the UI can highlight bound values.
+
+    Why a sentinel dance: pretty_sql changes character offsets (newlines /
+    indentation), so the offsets we'd compute up front are stale by the
+    time the user sees the text. Sentinels follow the text through the
+    formatter and let us recover ranges in the final coordinates.
+    """
+    if not sql or not params:
+        return sql, []
+    out: list[str] = []
+    last = 0
+    pi = 0
+    for off in _iter_placeholders(sql):
+        out.append(sql[last:off])
+        if pi < len(params):
+            typ, val = params[pi]
+            out.append(SUBST_OPEN)
+            out.append(format_param(typ, val))
+            out.append(SUBST_CLOSE)
+            pi += 1
+        else:
+            out.append("?")
+        last = off + 1
+    out.append(sql[last:])
+    return "".join(out), []  # ranges intentionally empty here — call
+                              # extract_subst_ranges after prettifying
+
+
+def extract_subst_ranges(marked: str) -> tuple[str, list[tuple[int, int]]]:
+    """Strip `SUBST_OPEN/CLOSE` sentinels from `marked` and return the
+    clean text plus the (start, end) char ranges of each substituted run.
+
+    Robust against unbalanced sentinels (defensive — should never happen
+    with our own producer, but a stray one in input data shouldn't break
+    rendering): orphans are simply stripped and not added to ranges."""
+    if SUBST_OPEN not in marked:
+        return marked, []
+    out: list[str] = []
+    ranges: list[tuple[int, int]] = []
+    pos = 0           # offset in the cleaned output we're building
+    open_at: int | None = None
+    for ch in marked:
+        if ch == SUBST_OPEN:
+            open_at = pos
+        elif ch == SUBST_CLOSE:
+            if open_at is not None:
+                ranges.append((open_at, pos))
+                open_at = None
+            # silently drop unbalanced close
+        else:
+            out.append(ch)
+            pos += 1
+    return "".join(out), ranges
+
+
+# ── Pretty-printer (very small, deliberately minimal) ────────────────────────
+# Major clause keywords get a fresh line. Joins get a fresh line *and* a
+# small indent so they read nested under the FROM. AND/OR connectives in
+# conditions go on their own indented line. The aim is "easy to scan",
+# not RDBMS-grade reflow — leave a real formatter to the user's IDE.
+_TOP_LEVEL_KEYWORDS = (
+    "WITH", "SELECT", "INSERT INTO", "INTO", "VALUES", "UPDATE", "SET",
+    "DELETE FROM", "MERGE INTO", "FROM", "WHERE", "GROUP BY", "HAVING",
+    "ORDER BY", "LIMIT", "OFFSET", "FETCH FIRST",
+    "UNION ALL", "UNION", "INTERSECT", "EXCEPT",
+)
+_JOIN_KEYWORDS = (
+    "LEFT OUTER JOIN", "RIGHT OUTER JOIN", "FULL OUTER JOIN",
+    "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "INNER JOIN", "CROSS JOIN", "JOIN",
+    "ON",
+)
+# Connectives inside ON/WHERE/HAVING — indented further so they sit under
+# their parent clause visually.
+_CONNECTIVE_KEYWORDS = ("AND", "OR")
+
+# Build one big alternation, longest first so e.g. `LEFT OUTER JOIN` matches
+# before `JOIN`. Word-boundary on both sides keeps `INTO` from triggering
+# inside `INTOSAKI_TENPO_CD`.
+_PRETTY_TOP_RE = re.compile(
+    r"\b(" + "|".join(re.escape(kw) for kw in
+                      sorted(_TOP_LEVEL_KEYWORDS, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+_PRETTY_JOIN_RE = re.compile(
+    r"\b(" + "|".join(re.escape(kw) for kw in
+                      sorted(_JOIN_KEYWORDS, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+_PRETTY_CONNECTIVE_RE = re.compile(
+    r"\b(" + "|".join(_CONNECTIVE_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def pretty_sql(sql: str) -> str:
+    """Lightweight SQL prettifier. Inserts newlines before major clauses
+    and joins; leaves the surrounding text untouched. Quote-aware: tokens
+    inside `'…'` literals are left alone.
+
+    Returns `sql` unchanged for empty input. The output isn't reflowed to
+    a target column width — long SELECT lists stay on one line. The goal
+    is "give my eyes a chance" on a 933-char query, not full RDBMS-grade
+    formatting (your IDE does that better)."""
+    if not sql or not sql.strip():
+        return sql
+
+    # Mask string literals so keywords inside them aren't broken across
+    # lines. We compute newline insert positions on the masked string,
+    # then apply them to the original (so the visible content survives).
+    masked = _mask_string_literals(sql)
+
+    # Collect (offset, replacement) tuples. We rebuild the string in one
+    # pass at the end to avoid mutating positions mid-loop.
+    edits: list[tuple[int, int, str]] = []  # (start, end, new_text)
+
+    def _emit(m: re.Match, prefix: str):
+        start, end = m.start(1), m.end(1)
+        # Don't emit a newline for the very first non-whitespace token —
+        # the SQL already starts there.
+        leading = masked[:start]
+        if not leading.strip():
+            return
+        # Don't double-up newlines: if the char immediately before the
+        # match is already \n (possibly with spaces), skip.
+        i = start - 1
+        while i >= 0 and masked[i] in " \t":
+            i -= 1
+        if i >= 0 and masked[i] == "\n":
+            return
+        kw = sql[start:end]    # keep original casing
+        edits.append((start, end, prefix + kw))
+
+    for m in _PRETTY_TOP_RE.finditer(masked):
+        _emit(m, "\n")
+    for m in _PRETTY_JOIN_RE.finditer(masked):
+        _emit(m, "\n  ")
+    for m in _PRETTY_CONNECTIVE_RE.finditer(masked):
+        _emit(m, "\n    ")
+
+    if not edits:
+        return sql.strip()
+
+    # Apply edits in reverse so earlier positions don't shift.
+    edits.sort(key=lambda e: e[0])
+    out: list[str] = []
+    cursor = 0
+    for start, end, repl in edits:
+        if start < cursor:
+            continue   # shouldn't happen with sorted, non-overlapping edits
+        out.append(sql[cursor:start])
+        out.append(repl)
+        cursor = end
+    out.append(sql[cursor:])
+    pretty = "".join(out).strip()
+
+    # Collapse runs of whitespace *after* the first non-space char on each
+    # line — keeps the leading indent we added for JOIN/AND/OR but folds
+    # the tab/space padding the original Java string concatenation left
+    # inside each clause. The lookbehind on `(?<=\S)` is what protects the
+    # leading indent.
+    pretty = "\n".join(re.sub(r"(?<=\S)[ \t]{2,}", " ", line).rstrip()
+                       for line in pretty.splitlines())
+    return pretty
+
+
+# ── SQL tokenizer (lightweight, used for syntax highlighting) ────────────────
+# Reserved word set — covers what's actually present in the in-tree logs.
+# Case-insensitive on lookup, but the output preserves the original casing so
+# the highlighter doesn't change what the user sees.
+_SQL_KEYWORDS = frozenset(s.upper() for s in (
+    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "EXISTS", "BETWEEN",
+    "LIKE", "IS", "NULL", "AS", "DISTINCT", "ALL", "GROUP", "BY", "HAVING",
+    "ORDER", "ASC", "DESC", "LIMIT", "OFFSET", "FETCH", "FIRST", "ROWS",
+    "ROW", "WITH", "RECURSIVE", "UNION", "INTERSECT", "EXCEPT", "VALUES",
+    "INSERT", "INTO", "UPDATE", "SET", "DELETE", "MERGE", "TRUNCATE",
+    "CREATE", "ALTER", "DROP", "TABLE", "INDEX", "VIEW", "PROCEDURE",
+    "FUNCTION", "CASE", "WHEN", "THEN", "ELSE", "END", "ON", "USING",
+    "JOIN", "INNER", "OUTER", "LEFT", "RIGHT", "FULL", "CROSS",
+    "COALESCE", "NULLIF", "CAST", "CONVERT", "EXTRACT",
+    "TRUE", "FALSE", "DEFAULT", "PRIMARY", "KEY", "FOREIGN", "REFERENCES",
+    "CHECK", "UNIQUE", "CONSTRAINT", "GRANT", "REVOKE", "COMMIT", "ROLLBACK",
+    "SAVEPOINT", "BEGIN", "DECLARE", "RETURN", "RETURNING",
+))
+
+# Pre-compiled scanner. Each named group is one token kind. We try them in
+# this order: comments before strings before numbers before words, and the
+# "anything else" catch-all keeps the scan moving over whitespace/punct.
+# `re.DOTALL` so `/* … */` block comments can span newlines.
+_SQL_TOKEN_RE = re.compile(
+    r"(?P<lcomment>--[^\n]*)"
+    r"|(?P<bcomment>/\*.*?\*/)"
+    r"|(?P<string>'(?:''|[^'])*')"
+    r"|(?P<number>\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)"
+    r"|(?P<word>[A-Za-z_][A-Za-z_0-9]*)"
+    r"|(?P<other>.)",
+    re.DOTALL,
+)
+
+
+def tokenize_sql_for_highlight(sql: str) -> list[tuple[int, int, str]]:
+    """Return `(start, end, tag)` triples for syntax-highlight tagging.
+
+    Tags emitted: `"keyword"`, `"string"`, `"number"`, `"comment"`. Plain
+    identifiers and punctuation/whitespace are NOT emitted (the caller
+    leaves them in the default style), keeping the tag set minimal so the
+    Tk Text widget stays fast on multi-thousand-char SQL."""
+    out: list[tuple[int, int, str]] = []
+    if not sql:
+        return out
+    for m in _SQL_TOKEN_RE.finditer(sql):
+        kind = m.lastgroup
+        if kind == "lcomment" or kind == "bcomment":
+            out.append((m.start(), m.end(), "comment"))
+        elif kind == "string":
+            out.append((m.start(), m.end(), "string"))
+        elif kind == "number":
+            out.append((m.start(), m.end(), "number"))
+        elif kind == "word":
+            if m.group(0).upper() in _SQL_KEYWORDS:
+                out.append((m.start(), m.end(), "keyword"))
+        # 'other' and non-keyword 'word' fall through — no tag.
+    return out
 
 
 # ── SQL shape helpers (statement type / target tables) ───────────────────────

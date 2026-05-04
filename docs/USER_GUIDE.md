@@ -151,12 +151,11 @@ the app. Tables on the left, columns of the selected table on the right
 
 ---
 
-## 🛠 Tools
+## 🛠 Extract SQL from log… (`Ctrl+Shift+L`)
 
-A separate menubutton next to *⚙ Settings* hosts developer utilities that
-aren't part of the translation pipeline. Currently:
-
-### Extract SQL from log… (`Ctrl+Shift+L`)
+A dedicated button on the topbar next to *⚙ Settings* opens this — the
+log-extractor is the most-used dev utility so it earns a single-click
+home rather than living in a menu.
 
 Reads a `stclibApp.log` produced by `commons.dao.PreparedStatementEx`,
 parses **every** prepared statement it contains, surfaces the 1–2
@@ -167,10 +166,17 @@ runnable SQL.
 
 #### Browsing a log
 
-- **Log dropdown**: pick from your most recent paths, or **Browse…**
-  to add a new one. Up to 8 paths are kept so you can hop between e.g.
-  `lawmasterhansoku-web` and `lawdailyorder-web` instantly. **Reload**
-  re-reads the file (useful after a server run produces new entries).
+- **Log chips**: each recent path shows as a small button at the top of
+  the dialog (label = the last 2 path segments, e.g.
+  `…/mdw_lawmasterhansoku-web/log`). The active chip is highlighted —
+  one click swaps the active log instantly. Right-click a chip for
+  *Remove from list* / *Open containing folder*. **+ Add log** opens a
+  file picker; up to 8 chips are kept.
+- **↻ Reload** force re-parses the active log right now.
+- **☑ Auto** (default ON) watches the active log file's mtime in the
+  background while the dialog is open — any change re-parses
+  automatically (~1.5 s lag) and a quick toast pops up so you know it
+  happened. Untick when you want full manual control.
 - The **statement list** is grouped under the user request that
   triggered each batch — you'll see something like
   *`PdaHonbuIdoShijiTorikomiAction#search  (9 queries · 3 ★)`*. The
@@ -186,9 +192,32 @@ runnable SQL.
 - **☑ Hide infrastructure** (default ON): only ★-primary statements
   show. Untick to see everything (every audit insert, every config
   read).
-- **Click a statement** → its SQL / Params / Result tabs render below.
-  The first ★-primary statement is auto-selected after each load so
-  you usually need zero clicks.
+- **Click a statement** → its **Result (filled)**, then **SQL (with
+  ?)**, then **Params** tabs render below. Result is the first tab
+  because it's the one you usually want; the SQL in that tab is also
+  *prettified* — line breaks at major clauses (SELECT / FROM / WHERE /
+  ORDER BY / GROUP BY / HAVING / UNION / WITH / VALUES …), each JOIN
+  and AND/OR indented under its parent. The first ★-primary statement
+  is auto-selected after each load so you usually need zero clicks.
+- **Result pane highlights**: SQL keywords, string literals, numbers,
+  and comments render in distinct theme-aware colors. **Values that
+  came from bound parameters** (the substitutions for each `?`) get
+  their own accent + tint so you can see at a glance what came from
+  the original SQL vs what the JDBC driver bound — even when the
+  bound value is itself a string literal.
+- **Sort by any column**: click the `Time` / `ID` / `DAO` / `Type` /
+  `Tables` / `?` / `Score` headers to sort statements *within* each
+  user-action group (the grouping itself is preserved). A `▼` / `▲`
+  arrow shows the current direction; click again to flip.
+- **Statement-type chips**: a second row of toggles next to the
+  search box — `SELECT / INSERT / UPDATE / DELETE / OTHER` plus
+  `All` / `None` shortcuts. Untick types you don't care about right
+  now; remembered per project across sessions.
+- **Result tab toolbar** — `📋 Copy` puts the prettified SQL on the
+  clipboard. `☑ Auto-copy` makes every selection auto-copy
+  immediately so you can click a row and just paste into your DB
+  tool — no second click. Toggling Auto-copy on with a statement
+  already selected copies it right away.
 
 #### Defaults (per project, editable in `translator_settings.json`)
 

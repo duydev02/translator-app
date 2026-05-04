@@ -426,19 +426,15 @@ class TranslatorApp(_BaseTk):
         )
         self._settings_btn.pack(side="right", pady=8)
 
-        # ── 🛠 Tools menubutton ─────────────────────────────────────────────
-        # Houses developer utilities that aren't part of the translation
-        # pipeline (log → SQL extractor first; future tools slot in here
-        # without crowding the main mode tabs or the Settings menu).
-        self._tools_btn = tk.Menubutton(self._topbar, text="🛠  Tools",
-            font=self._ui_b, relief="flat", padx=12, pady=4, cursor="hand2", bd=0)
-        self._tools_menu = tk.Menu(self._tools_btn, tearoff=0)
-        self._tools_btn["menu"] = self._tools_menu
-        self._tools_menu.add_command(
-            label="Extract SQL from log…",
-            accelerator="Ctrl+Shift+L",
-            command=self.open_log_sql_dialog,
-        )
+        # ── 🛠 Extract SQL — direct button on the topbar ────────────────
+        # The log-extractor is the main developer utility and gets opened
+        # constantly during debugging, so it earns a dedicated single-click
+        # button instead of living behind a Tools menu. If more
+        # developer tools land later, convert this back into a menubutton
+        # with submenu entries (see git history for the previous shape).
+        self._tools_btn = tk.Button(self._topbar, text="🛠  Extract SQL",
+            font=self._ui_b, relief="flat", padx=12, pady=4, cursor="hand2", bd=0,
+            command=self.open_log_sql_dialog)
         self._tools_btn.pack(side="right", padx=(0, 6), pady=8)
 
         # ── Doc-tab bar (multi-input) ────────────────────────────────────────
@@ -737,7 +733,6 @@ class TranslatorApp(_BaseTk):
         # entries (Line numbers / Word wrap / Auto-paste).
         for menu in (
             getattr(self, "_settings_menu", None),
-            getattr(self, "_tools_menu",    None),
             getattr(self, "_history_menu",  None),
         ):
             if menu is None:
@@ -2509,7 +2504,7 @@ class TranslatorApp(_BaseTk):
             (self._tab_forward,  "Translate physical → logical names"),
             (self._tab_reverse,  "Translate logical → physical names"),
             (self._settings_btn, "Theme, layout, filter, exclusions, user map, file operations"),
-            (self._tools_btn,    "Developer tools: extract SQL from log… (Ctrl+Shift+L)"),
+            (self._tools_btn,    "Extract SQL from log: parse stclibApp.log, fill ?-placeholders with bound params (Ctrl+Shift+L)"),
             (self._help_btn,     "Help & keyboard shortcuts (F1)"),
             (self._translate_btn,"Translate the input (Ctrl+Enter)"),
             (self._copy_btn,     "Copy output to clipboard (Ctrl+Shift+C)"),
