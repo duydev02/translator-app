@@ -181,40 +181,10 @@ class TranslatorApp(_BaseTk):
         if bool(self._auto_paste.get()):
             self._start_auto_paste_poll()
 
-        # Bindings
-        self.input_box.bind("<Control-Return>", self._on_ctrl_enter)
-        self.bind_all("<Control-BackSpace>",  lambda e: self.on_clear())
-        self.bind_all("<Control-Shift-C>",    lambda e: self.on_copy())
-        self.bind_all("<Control-s>",          lambda e: self.on_export())
-        self.bind_all("<Control-r>",          lambda e: self.on_reload_json())
-        self.bind_all("<Control-f>",          lambda e: self.open_search_bar())
-        self.bind_all("<Escape>",             lambda e: self.close_search_bar())
-        self.bind_all("<F1>",                 lambda e: self.show_help_dialog())
-        self.bind_all("<Control-m>",          lambda e: self.toggle_mode())
-        self.bind_all("<Control-Shift-D>",    lambda e: self.toggle_direction())
-        self.bind_all("<Control-plus>",       lambda e: self.zoom_in())
-        self.bind_all("<Control-equal>",      lambda e: self.zoom_in())
-        self.bind_all("<Control-minus>",      lambda e: self.zoom_out())
-        self.bind_all("<Control-0>",          lambda e: self.zoom_reset())
-        self.bind_all("<Control-l>",          lambda e: self.toggle_line_numbers())
-        # Command palette (cross-platform)
-        self.bind_all("<Control-p>",          lambda e: self.open_command_palette())
-        self.bind_all("<Command-p>",          lambda e: self.open_command_palette())
-        # Schema Browser / Snippets quick-access
-        self.bind_all("<Control-b>",          lambda e: self.open_schema_browser())
-        self.bind_all("<Command-b>",          lambda e: self.open_schema_browser())
-        # Ctrl+Shift+B: open Schema Browser pre-filtered to names found in input
-        self.bind_all("<Control-Shift-B>",    lambda e: self.open_schema_browser_for_input())
-        self.bind_all("<Command-Shift-B>",    lambda e: self.open_schema_browser_for_input())
-        # Ctrl+Shift+L: 🛠 Extract SQL from log… (Ctrl+L alone toggles line numbers)
-        self.bind_all("<Control-Shift-L>",    lambda e: self.open_log_sql_dialog())
-        self.bind_all("<Command-Shift-L>",    lambda e: self.open_log_sql_dialog())
-        self.bind_all("<Control-j>",          lambda e: self.open_snippets_dialog())
-        self.bind_all("<Command-j>",          lambda e: self.open_snippets_dialog())
-        self.bind_all("<Control-t>",          lambda e: self._new_doc_tab())
-        self.bind_all("<Control-w>",          lambda e: self._close_doc_tab(self._active_doc))
-        self.bind_all("<Control-Tab>",        lambda e: self._cycle_doc_tab(1))
-        self.bind_all("<Control-Shift-Tab>",  lambda e: self._cycle_doc_tab(-1))
+        # Keyboard shortcuts (kept in a sibling module for readability;
+        # see translator_app/ui/keybindings.py for the full table).
+        from . import keybindings as _kb
+        _kb.install(self)
         self._render_doctabs()
         # Load the (possibly restored) active tab's input/mode/direction
         # into the live widgets.
@@ -240,6 +210,11 @@ class TranslatorApp(_BaseTk):
         self.input_box.bind("<Key>",       self._guard_placeholder_keypress, add="+")
         self.input_box.bind("<Button-1>",  self._guard_placeholder_click,    add="+")
 
+        # Schema-aware autocomplete on the input box. Reads `self.table_index`
+        # / `self.column_index` so it stays in sync with User Map overrides.
+        from . import autocomplete as _ac
+        self._autocomplete = _ac.attach(self, self.input_box)
+
         # Hover tooltip + toast
         self._tooltip = Tooltip(self)
         self._tooltip.set_theme_fn(lambda: THEMES[self._theme])
@@ -264,14 +239,10 @@ class TranslatorApp(_BaseTk):
             except Exception:
                 pass
 
-        # Save settings on exit
+        # Save settings on exit. (Cmd+Q on macOS frequently bypasses
+        # WM_DELETE_WINDOW; the equivalent keybindings are installed
+        # via translator_app/ui/keybindings.py.)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        # Cmd+Q on macOS frequently bypasses WM_DELETE_WINDOW. Bind it (and
-        # Ctrl+Q on other platforms) to the same close handler so the doc-tab
-        # input is captured before the process exits.
-        self.bind_all("<Command-q>",     lambda e: self.on_close())
-        self.bind_all("<Command-Q>",     lambda e: self.on_close())
-        self.bind_all("<Control-q>",     lambda e: self.on_close())
         # Pending auto-save handle for doc-tab input.
         self._docs_save_job = None
 
@@ -958,12 +929,11 @@ class TranslatorApp(_BaseTk):
             self._persist_pref("word_wrap", use_wrap)
 
     def _persist_pref(self, key, value):
-        """Update a single setting key and write the file right away."""
-        try:
-            self._settings[key] = value
-            save_settings(self._settings)
-        except Exception:
-            pass
+        """Update a single setting key and write the file right away.
+        Thin wrapper over `persistence.persist_pref` kept for legacy
+        in-class callers."""
+        from . import persistence as _p
+        _p.persist_pref(self, key, value)
 
     # ── Auto-paste from clipboard ─────────────────────────────────────────────
     _SQL_KW_RE = re.compile(
@@ -1764,32 +1734,12 @@ class TranslatorApp(_BaseTk):
         self._schedule_doc_save()
 
     def _schedule_doc_save(self, delay_ms=2500):
-        """Persist the active doc-tab's input shortly after the user stops
-        typing. Guarantees the input survives even when the app exits via
-        Cmd+Q / kill / crash without firing on_close."""
-        if self._docs_save_job:
-            try: self.after_cancel(self._docs_save_job)
-            except Exception: pass
-        self._docs_save_job = self.after(delay_ms, self._persist_doc_tabs)
+        from . import persistence as _p
+        _p.schedule_doc_save(self, delay_ms)
 
     def _persist_doc_tabs(self):
-        self._docs_save_job = None
-        try:
-            self._capture_active_doc()
-            self._settings["doc_tabs"] = [
-                {
-                    "title":        d.get("title", ""),
-                    "input":        d.get("input", ""),
-                    "mode":         d.get("mode", "inline"),
-                    "direction":    d.get("direction", "forward"),
-                    "manual_title": bool(d.get("manual_title", False)),
-                }
-                for d in self._doctabs
-            ]
-            self._settings["active_doc"] = self._active_doc
-            save_settings(self._settings)
-        except Exception:
-            pass
+        from . import persistence as _p
+        _p.persist_doc_tabs_now(self)
 
     def _schedule_input_highlight(self, delay_ms=300):
         if self._input_hi_job:
@@ -2525,53 +2475,6 @@ class TranslatorApp(_BaseTk):
 
     # ── Close handler ─────────────────────────────────────────────────────────
     def on_close(self):
-        # Persist settings
-        try:
-            self._capture_active_doc()
-            self._settings["doc_tabs"] = [
-                {
-                    "title":        d.get("title", ""),
-                    "input":        d.get("input", ""),
-                    "mode":         d.get("mode", "inline"),
-                    "direction":    d.get("direction", "forward"),
-                    "manual_title": bool(d.get("manual_title", False)),
-                }
-                for d in self._doctabs
-            ]
-            self._settings["active_doc"] = self._active_doc
-            self._settings.update({
-                "theme":         self._theme,
-                "mode":          self._mode.get(),
-                "direction":     self._direction.get(),
-                "filter_schemas":          sorted(self._filter_schemas),
-                "filter_tables":           sorted(self._filter_tables),
-                "design_uppercase":        bool(self._uppercase_var.get()),
-                "design_show_overview":    bool(self._show_overview.get()),
-                "design_show_sql_logical": bool(self._show_sql_logical.get()),
-                "design_show_sql_physical":bool(self._show_sql_physical.get()),
-                "design_show_stype":       bool(self._show_stype.get()),
-                "design_show_target":      bool(self._show_target.get()),
-                "design_show_projection":  bool(self._show_projection.get()),
-                "design_show_from":        bool(self._show_from.get()),
-                "design_show_join":        bool(self._show_join.get()),
-                "design_show_where":       bool(self._show_where.get()),
-                "design_show_group":       bool(self._show_group.get()),
-                "design_show_having":      bool(self._show_having.get()),
-                "design_show_order":       bool(self._show_order.get()),
-                "design_show_footer":      bool(self._show_footer.get()),
-                "design_show_stats":       bool(self._show_stats.get()),
-                "pane_orient":             self._pane_orient,
-                "show_line_numbers":       bool(self._show_line_numbers.get()),
-                "word_wrap":               bool(self._word_wrap.get()),
-                "auto_paste":              bool(self._auto_paste.get()),
-                "font_size":     self._font_size,
-                "geometry":      self.winfo_geometry(),
-            })
-            save_settings(self._settings)
-            # Save current input to history if non-trivial
-            text = self._current_input().strip()
-            if text and len(text) > 10:
-                self._add_history(text)
-        except Exception:
-            pass
+        from . import persistence as _p
+        _p.finalize_on_close(self)
         self.destroy()

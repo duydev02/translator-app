@@ -5,6 +5,29 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **Schema-aware autocomplete** in the input box — typing 2+ characters
+  of a known table or column pops a small list of matches (tables first,
+  then columns, deduped, capped at 10). `↓`/`↑` navigate, `Tab` / `Enter`
+  / `→` accept, `Esc` or click-elsewhere dismiss. Reads the live indexes
+  so User Map overrides are picked up immediately.
+- **84 new tests** (163 total): `tests/test_designdoc_extras.py` covers
+  `_pretty_sql`, `_is_paren_group`, multi-buffer detection, `_parse_*`
+  edge cases, outer-paren stripping, placeholder resolution, and the
+  `compute_design_*` helpers consumed by Inspect; `tests/test_dialog_helpers.py`
+  covers the command-palette fuzzy matcher, snippet name extraction, and
+  schema-browser data builders; `tests/test_autocomplete.py` exercises
+  the new suggestion engine.
+
+### Changed
+- **`app.py` split** — extracted the keyboard-shortcut registration table
+  (`translator_app/ui/keybindings.py`) and all save/load logic
+  (`translator_app/ui/persistence.py`) into focused sibling modules. The
+  duplicated 50-line settings-dump that used to live in both `on_close`
+  and `_persist_doc_tabs` is now a single helper. `app.py` is down by
+  ~100 lines; future dialog/feature work no longer has to scroll past
+  unrelated boilerplate.
+
+### Added
 - **🛠 Extract SQL from log… UX overhaul** — the dialog now shows a
   row of **chip buttons** at the top, one per recent log path
   (labelled with the last 2 path segments, e.g.
