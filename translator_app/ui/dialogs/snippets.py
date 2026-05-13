@@ -26,6 +26,7 @@ from tkinter import ttk, simpledialog
 
 from ...themes import THEMES
 from ...config import save_settings
+from .placement import place_dialog
 
 
 def _now_iso():
@@ -59,7 +60,7 @@ def open_snippets_dialog(app):
     dlg = tk.Toplevel(app)
     app._snippets_dialog = dlg
     dlg.title("Snippets")
-    dlg.geometry("1080x680")
+    place_dialog(dlg, app, 1080, 680, min_width=900, min_height=560)
     dlg.configure(bg=t["bg"])
     dlg.transient(app)
 

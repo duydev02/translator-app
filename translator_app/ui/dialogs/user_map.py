@@ -5,6 +5,7 @@ from tkinter import ttk
 from ...config import save_user_map
 from ...paths import USER_MAP_FILE
 from ...themes import THEMES
+from .placement import place_dialog
 
 
 def open_user_map_dialog(app):
@@ -12,7 +13,7 @@ def open_user_map_dialog(app):
     t = THEMES[app._theme]
     dlg = tk.Toplevel(app)
     dlg.title("User-Defined Overrides")
-    dlg.geometry("760x600")
+    place_dialog(dlg, app, 760, 600, min_width=620, min_height=460)
     dlg.minsize(620, 460)
     dlg.configure(bg=t["bg"])
     dlg.transient(app); dlg.grab_set()

@@ -8,8 +8,7 @@ from translator_app.ui.app import TranslatorApp
 from translator_app.ui.widgets import _DND_AVAILABLE
 
 
-# ── Entry ─────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
+def main():
     if not os.path.exists(JSON_FILE):
         msg = (
             f"db_schema_output.json was not found next to the application.\n\n"
@@ -22,10 +21,16 @@ if __name__ == "__main__":
             messagebox.showerror("Missing data file", msg)
         except Exception:
             print("ERROR:", msg)
-        sys.exit(1)
+        return 1
 
     print(f"Loading: {JSON_FILE}")
     app = TranslatorApp(JSON_FILE)
     if not _DND_AVAILABLE:
         print("  (Install 'tkinterdnd2' for drag-and-drop file support: pip install tkinterdnd2)")
     app.mainloop()
+    return 0
+
+
+# ── Entry ─────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    sys.exit(main())

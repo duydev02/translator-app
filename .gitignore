@@ -26,6 +26,8 @@ translator_custom_map.json
 translator_exclusions.txt
 translator_history.txt
 translator_settings.json
+translator_startup.log
+translator_app.log
 # Sample log used during local development; real production logs contain
 # customer data and shouldn't end up in version control.
 stclibApp.log
@@ -47,4 +49,5 @@ desktop.ini
 *.bak
 *.tmp
 *_bk.json
+*_bk*.json
 _test_output*.txt

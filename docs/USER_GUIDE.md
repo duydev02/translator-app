@@ -281,3 +281,19 @@ count is shown next to the search field. `Esc` closes the bar.
 - `Ctrl + = / Ctrl + - / Ctrl + 0` — font size up/down/reset.
 
 All preferences, window size, and layout are persisted between sessions.
+
+---
+
+## Startup & window placement
+
+The app shows a small startup window while settings, schema indexes, and the
+main interface are loading. If startup stalls, check `translator_startup.log`
+next to the executable/source checkout for the last completed stage.
+
+Use **Settings -> Reset window geometry** if the main window opens off-screen or
+too small. Use **Settings -> Clear saved tabs** if a restored tab makes startup
+slow. These actions keep schema data, User Map, exclusions, and history.
+
+Dialogs opened from **Settings** and **Extract SQL** are placed near the main
+window. On Windows multi-monitor setups, the app uses the parent window's
+native monitor so child windows stay on the same screen as the Translator app.

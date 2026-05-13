@@ -20,6 +20,7 @@ from tkinter import ttk
 
 from ...themes import THEMES
 from ...paths import CUSTOM_SCHEMA
+from .placement import place_dialog
 
 
 def open_schema_browser(app, name_filter=None):
@@ -44,7 +45,7 @@ def open_schema_browser(app, name_filter=None):
     dlg = tk.Toplevel(app)
     app._schema_browser_dialog = dlg
     dlg.title("Schema Browser")
-    dlg.geometry("1080x680")
+    place_dialog(dlg, app, 1080, 680, min_width=900, min_height=560)
     dlg.configure(bg=t["bg"])
     dlg.transient(app)
 

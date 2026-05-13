@@ -3,13 +3,14 @@ from tkinter import scrolledtext
 
 from ...config import save_exclusions
 from ...themes import THEMES
+from .placement import place_dialog
 
 
 def open_exclusions_dialog(app):
     t = THEMES[app._theme]
     dlg = tk.Toplevel(app)
     dlg.title("Exclusion List — do not translate")
-    dlg.geometry("560x460")
+    place_dialog(dlg, app, 560, 460, min_width=420, min_height=320)
     dlg.minsize(420, 320)
     dlg.configure(bg=t["bg"])
     dlg.transient(app); dlg.grab_set()

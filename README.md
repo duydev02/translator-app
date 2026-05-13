@@ -121,6 +121,8 @@ control); copy the sample to bootstrap a fresh clone.
 | `translator_exclusions.txt`   | Strings preserved as-is during translation. |
 | `translator_settings.json`    | Theme, layout, font size, active filters, window geometry. |
 | `translator_history.txt`      | Last 10 inputs (click ⌄ History to recall). |
+| `translator_startup.log`      | Startup breadcrumbs for diagnosing blank-window launches. |
+| `translator_app.log`          | Unexpected UI callback errors. |
 
 ---
 
@@ -148,6 +150,8 @@ The project is a single-file app (`translator.py`). No dependencies needed to ru
 from source except Python 3.10+ with Tkinter (ships with standard CPython).
 
 ```powershell
+pip install -e ".[test]"
+python -m pytest
 python translator.py
 ```
 

@@ -1,13 +1,14 @@
 import tkinter as tk
 
 from ...themes import THEMES
+from .placement import place_dialog
 
 
 def open_filter_dialog(app):
     t = THEMES[app._theme]
     dlg = tk.Toplevel(app)
     dlg.title("Translation Filter")
-    dlg.geometry("680x560")
+    place_dialog(dlg, app, 680, 560, min_width=520, min_height=420)
     dlg.minsize(520, 420)
     dlg.configure(bg=t["bg"])
     dlg.transient(app); dlg.grab_set()

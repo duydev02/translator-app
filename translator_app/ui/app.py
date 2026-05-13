@@ -1,8 +1,10 @@
 import os
 import re
 import sys
+import time
+import traceback
 import tkinter as tk
-from tkinter import scrolledtext, font, ttk, filedialog
+from tkinter import scrolledtext, font, ttk, filedialog, messagebox
 
 from ..config import (
     load_exclusions,
@@ -46,18 +48,148 @@ if _DND_AVAILABLE:
     from tkinterdnd2 import DND_FILES   # type: ignore
 
 
+_STARTUP_LOG = os.path.join(BASE_DIR, "translator_startup.log")
+_APP_LOG = os.path.join(BASE_DIR, "translator_app.log")
+_DEFAULT_GEOMETRY = "1060x800"
+_GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)(?:[+-]\d+){0,2}$")
+
+
+def _startup_log(message):
+    try:
+        with open(_STARTUP_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    except Exception:
+        pass
+
+
+def _app_log(message, exc_info=None):
+    try:
+        with open(_APP_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+            if exc_info:
+                traceback.print_exception(*exc_info, file=f)
+    except Exception:
+        pass
+
+
+def _safe_bool(value, default=False):
+    return value if isinstance(value, bool) else default
+
+
+def _safe_str_choice(value, choices, default):
+    return value if value in choices else default
+
+
+def _safe_string_list(value):
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str)]
+
+
+def _safe_font_size(value):
+    try:
+        return max(6, min(int(value), 28))
+    except Exception:
+        return 10
+
+
+def _safe_active_doc(value, tab_count):
+    try:
+        idx = int(value)
+    except Exception:
+        return 0
+    return idx if 0 <= idx < tab_count else 0
+
+
+def _safe_geometry(value):
+    if not isinstance(value, str):
+        return _DEFAULT_GEOMETRY
+    m = _GEOMETRY_RE.match(value.strip())
+    if not m:
+        return _DEFAULT_GEOMETRY
+    width, height = int(m.group(1)), int(m.group(2))
+    if width < 780 or height < 540 or width > 10000 or height > 10000:
+        return _DEFAULT_GEOMETRY
+    return value
+
+
+def _safe_doc_tabs(value, fallback_mode, fallback_direction):
+    tabs = []
+    if isinstance(value, list):
+        for d in value:
+            if not isinstance(d, dict):
+                continue
+            tab_mode = _safe_str_choice(d.get("mode") or fallback_mode, {"inline", "designdoc"}, fallback_mode)
+            if tab_mode == "table":
+                tab_mode = "inline"
+            tabs.append({
+                "title": d.get("title") if isinstance(d.get("title"), str) else "",
+                "input": d.get("input") if isinstance(d.get("input"), str) else "",
+                "mode": tab_mode,
+                "direction": _safe_str_choice(
+                    d.get("direction") or fallback_direction,
+                    {"forward", "reverse"},
+                    fallback_direction,
+                ),
+                "manual_title": _safe_bool(d.get("manual_title"), False),
+            })
+    if not tabs:
+        tabs.append({
+            "title": "Tab 1",
+            "input": "",
+            "mode": fallback_mode,
+            "direction": fallback_direction,
+            "manual_title": False,
+        })
+    return tabs
+
+
+def _sanitize_settings(settings):
+    if not isinstance(settings, dict):
+        _app_log("Settings file did not contain an object; using defaults")
+        settings = {}
+    clean = dict(settings)
+    clean["theme"] = _safe_str_choice(clean.get("theme"), set(THEMES), "light")
+    clean["mode"] = _safe_str_choice(clean.get("mode"), {"inline", "designdoc", "table"}, "inline")
+    if clean["mode"] == "table":
+        clean["mode"] = "inline"
+    clean["direction"] = _safe_str_choice(clean.get("direction"), {"forward", "reverse"}, "forward")
+    clean["filter_schemas"] = _safe_string_list(clean.get("filter_schemas"))
+    clean["filter_tables"] = _safe_string_list(clean.get("filter_tables"))
+    clean["font_size"] = _safe_font_size(clean.get("font_size"))
+    clean["pane_orient"] = _safe_str_choice(clean.get("pane_orient"), {"vertical", "horizontal"}, "vertical")
+    clean["show_line_numbers"] = _safe_bool(clean.get("show_line_numbers"), False)
+    clean["word_wrap"] = _safe_bool(clean.get("word_wrap"), True)
+    clean["auto_paste"] = _safe_bool(clean.get("auto_paste"), False)
+    clean["geometry"] = _safe_geometry(clean.get("geometry"))
+    clean["doc_tabs"] = _safe_doc_tabs(clean.get("doc_tabs"), clean["mode"], clean["direction"])
+    clean["active_doc"] = _safe_active_doc(clean.get("active_doc"), len(clean["doc_tabs"]))
+    return clean
+
+
 class TranslatorApp(_BaseTk):
     def __init__(self, json_path):
+        _startup_log("startup: begin")
         super().__init__()
+        _startup_log("startup: tk root created")
+        self._startup_shell = None
+        self._startup_status_var = None
+        self._show_startup_shell()
 
         # Load persistent state
-        self._settings   = load_settings()
+        self._set_startup_status("Loading settings...")
+        self._settings   = _sanitize_settings(load_settings())
         self._exclusions = load_exclusions()
         self._history    = load_history()
+        _startup_log("startup: settings loaded")
 
         # Load index
+        self._set_startup_status("Loading schema...")
         self._json_path = json_path
         self._load_data()
+        _startup_log(
+            f"startup: data loaded ({len(self.table_index)} tables, {len(self.column_index)} columns)"
+        )
 
         # Mutable state (persisted in settings)
         self._theme       = self._settings.get("theme", "light")
@@ -150,7 +282,8 @@ class TranslatorApp(_BaseTk):
                     break
         except Exception:
             pass
-        geom = self._settings.get("geometry", "1060x800")
+        geom = self._settings.get("geometry", _DEFAULT_GEOMETRY)
+        self._set_startup_status("Preparing window...")
         self.geometry(geom)
         self.minsize(780, 540)
 
@@ -160,7 +293,11 @@ class TranslatorApp(_BaseTk):
         self._btn     = font.Font(family="Segoe UI", size=10, weight="bold")
         self._small   = font.Font(family="Segoe UI", size=8)
 
+        self._set_startup_status("Building interface...")
+        self._clear_startup_shell()
         self._build()
+        _startup_log("startup: ui built")
+        self._set_startup_status("Applying theme...")
         self._apply_theme()
         self._refresh_mode_tabs()
         self._refresh_excl_btn()
@@ -187,57 +324,18 @@ class TranslatorApp(_BaseTk):
         _kb.install(self)
         self._render_doctabs()
         # Load the (possibly restored) active tab's input/mode/direction
-        # into the live widgets.
-        self._load_doc(self._active_doc)
+        # into the live widgets. The first translation is deferred until Tk
+        # has entered the event loop, otherwise an expensive restored input can
+        # leave Windows showing an unfinished white window as "Not responding".
+        self._load_doc(self._active_doc, translate=False)
+        self.after(80, self._initial_translate)
+        _startup_log("startup: active doc loaded")
 
-        # Right-click context menu
-        self.input_box.bind("<Button-3>",  lambda e: self._on_right_click(e, self.input_box))
-        self.output_box.bind("<Button-3>", lambda e: self._on_right_click(e, self.output_box))
-        # macOS / Linux: Control-click and two-finger trackpad → Button-2.
-        self.input_box.bind("<Button-2>",  lambda e: self._on_right_click(e, self.input_box))
-        self.output_box.bind("<Button-2>", lambda e: self._on_right_click(e, self.output_box))
-
-        # Auto-translate + input highlight
-        self.input_box.bind("<KeyRelease>", self._on_input_change)
-        self.input_box.bind("<<Paste>>",    self._on_paste)
-
-        # Focus-in / focus-out for placeholder
-        self.input_box.bind("<FocusIn>",  lambda e: self._clear_placeholder())
-        self.input_box.bind("<FocusOut>", lambda e: self._show_placeholder_if_empty())
-        # Defensive: if the placeholder somehow ends up visible while the box
-        # has focus (e.g. after Ctrl+⌫ or a programmatic clear), wipe it on
-        # the very first key/click so the user never edits placeholder text.
-        self.input_box.bind("<Key>",       self._guard_placeholder_keypress, add="+")
-        self.input_box.bind("<Button-1>",  self._guard_placeholder_click,    add="+")
-
-        # Schema-aware autocomplete on the input box. Reads `self.table_index`
-        # / `self.column_index` so it stays in sync with User Map overrides.
-        from . import autocomplete as _ac
-        self._autocomplete = _ac.attach(self, self.input_box)
-
-        # Hover tooltip + toast
-        self._tooltip = Tooltip(self)
-        self._tooltip.set_theme_fn(lambda: THEMES[self._theme])
-        self._toast = Toast(self)
-        self._toast.set_theme_fn(lambda: THEMES[self._theme])
-        self.output_box.bind("<Motion>", self._on_output_motion)
-        self.output_box.bind("<Leave>",  lambda e: self._tooltip.hide())
-
-        # Attach hover tooltips to discoverability-critical buttons
-        self._install_button_tooltips()
-
-        # Drag & drop with visual feedback (a translucent overlay across the
-        # input box telling the user "drop a file here").
+        # Optional/event-heavy wiring is deferred until after mainloop starts.
+        # On some Windows machines, one of these Tk/Tcl integrations can stall
+        # before the first paint; deferring keeps startup visibly alive.
+        self._autocomplete = None
         self._drop_overlay = None
-        if _DND_AVAILABLE:
-            try:
-                self.drop_target_register(DND_FILES)
-                self.dnd_bind("<<Drop>>",       self._on_file_drop)
-                self.dnd_bind("<<DropEnter>>",  self._on_drop_enter)
-                self.dnd_bind("<<DropLeave>>",  self._on_drop_leave)
-                self.dnd_bind("<<DropPosition>>", lambda e: None)
-            except Exception:
-                pass
 
         # Save settings on exit. (Cmd+Q on macOS frequently bypasses
         # WM_DELETE_WINDOW; the equivalent keybindings are installed
@@ -252,10 +350,140 @@ class TranslatorApp(_BaseTk):
         # Show a one-time welcome toast pointing new users at F1 / Cmd+P.
         if not self._settings.get("welcomed", False):
             self.after(700, self._show_welcome_toast)
+        self.after(10, self._finish_startup_wiring)
+        _startup_log("startup: ready for mainloop")
+
+    def _show_startup_shell(self):
+        try:
+            self.title("Translator")
+            self.geometry("420x320")
+            self.minsize(420, 320)
+            self.configure(bg="#ffffff")
+            frame = tk.Frame(self, bg="#ffffff")
+            frame.pack(fill="both", expand=True)
+            tk.Label(
+                frame,
+                text="Translator",
+                bg="#ffffff",
+                fg="#1f2937",
+                font=("Segoe UI", 18, "bold"),
+            ).pack(pady=(78, 8))
+            tk.Label(
+                frame,
+                text="Legacy Schema Helper",
+                bg="#ffffff",
+                fg="#4b5563",
+                font=("Segoe UI", 10),
+            ).pack()
+            self._startup_status_var = tk.StringVar(value="Starting...")
+            tk.Label(
+                frame,
+                textvariable=self._startup_status_var,
+                bg="#ffffff",
+                fg="#2563eb",
+                font=("Segoe UI", 9),
+            ).pack(pady=(42, 0))
+            self._startup_shell = frame
+            self.update_idletasks()
+            self.update()
+            _startup_log("startup: shell painted")
+        except Exception:
+            _app_log("Startup shell failed", sys.exc_info())
+
+    def _set_startup_status(self, text):
+        try:
+            if self._startup_status_var is not None:
+                self._startup_status_var.set(text)
+                self.update_idletasks()
+                self.update()
+            _startup_log(f"startup: status {text}")
+        except Exception:
+            _app_log("Startup status update failed", sys.exc_info())
+
+    def _clear_startup_shell(self):
+        try:
+            if self._startup_shell is not None:
+                self._startup_shell.destroy()
+                self._startup_shell = None
+                self._startup_status_var = None
+                self.configure(bg=THEMES[self._theme]["bg"])
+        except Exception:
+            _app_log("Startup shell cleanup failed", sys.exc_info())
 
     def _initial_focus(self):
         try:
             self.input_box.focus_set()
+        except Exception:
+            pass
+
+    def _finish_startup_wiring(self):
+        _startup_log("startup: wiring begin")
+        try:
+            self.input_box.bind("<Button-3>",  lambda e: self._on_right_click(e, self.input_box))
+            self.output_box.bind("<Button-3>", lambda e: self._on_right_click(e, self.output_box))
+            self.input_box.bind("<Button-2>",  lambda e: self._on_right_click(e, self.input_box))
+            self.output_box.bind("<Button-2>", lambda e: self._on_right_click(e, self.output_box))
+            _startup_log("startup: wiring context menus done")
+
+            self.input_box.bind("<KeyRelease>", self._on_input_change)
+            self.input_box.bind("<<Paste>>",    self._on_paste)
+            self.input_box.bind("<FocusIn>",  lambda e: self._clear_placeholder())
+            self.input_box.bind("<FocusOut>", lambda e: self._show_placeholder_if_empty())
+            self.input_box.bind("<Key>",       self._guard_placeholder_keypress, add="+")
+            self.input_box.bind("<Button-1>",  self._guard_placeholder_click,    add="+")
+            _startup_log("startup: wiring input binds done")
+
+            from . import autocomplete as _ac
+            self._autocomplete = _ac.attach(self, self.input_box)
+            _startup_log("startup: wiring autocomplete done")
+
+            self._tooltip = Tooltip(self)
+            self._tooltip.set_theme_fn(lambda: THEMES[self._theme])
+            self._toast = Toast(self)
+            self._toast.set_theme_fn(lambda: THEMES[self._theme])
+            self.output_box.bind("<Motion>", self._on_output_motion)
+            self.output_box.bind("<Leave>",  lambda e: self._tooltip.hide())
+            self._install_button_tooltips()
+            _startup_log("startup: wiring tooltip/toast done")
+
+            if _DND_AVAILABLE and bool(self._settings.get("enable_drag_drop", False)):
+                self.after(500, self._finish_drag_drop_wiring)
+            else:
+                _startup_log("startup: wiring drag-drop skipped")
+        except Exception:
+            _app_log("Startup wiring failed", sys.exc_info())
+            _startup_log("startup: wiring failed")
+
+    def _finish_drag_drop_wiring(self):
+        _startup_log("startup: wiring drag-drop begin")
+        try:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind("<<Drop>>",       self._on_file_drop)
+            self.dnd_bind("<<DropEnter>>",  self._on_drop_enter)
+            self.dnd_bind("<<DropLeave>>",  self._on_drop_leave)
+            self.dnd_bind("<<DropPosition>>", lambda e: None)
+            _startup_log("startup: wiring drag-drop done")
+        except Exception:
+            _app_log("Drag-drop wiring failed", sys.exc_info())
+            _startup_log("startup: wiring drag-drop failed")
+
+    def _initial_translate(self):
+        _startup_log("startup: initial translate begin")
+        try:
+            self.on_translate()
+            self._schedule_input_highlight()
+            _startup_log("startup: initial translate done")
+        except Exception as e:
+            _startup_log(f"startup: initial translate failed: {e!r}")
+            try:
+                self._toast.show(f"Startup translate failed: {e}", 3000, "error")
+            except Exception:
+                pass
+
+    def report_callback_exception(self, exc, val, tb):
+        _app_log("Unhandled Tk callback exception", (exc, val, tb))
+        try:
+            self._toast.show("Error saved to translator_app.log", 3000, "error")
         except Exception:
             pass
 
@@ -395,6 +623,11 @@ class TranslatorApp(_BaseTk):
             accelerator="Ctrl+R",
             command=self.on_reload_json,
         )
+        self._settings_menu.add_separator()
+        self._settings_menu.add_command(label="Open app folder", command=self.open_app_folder)
+        self._settings_menu.add_command(label="Open diagnostics log", command=self.open_diagnostics_log)
+        self._settings_menu.add_command(label="Reset window geometry", command=self.reset_window_geometry)
+        self._settings_menu.add_command(label="Clear saved tabs", command=self.clear_saved_tabs)
         self._settings_btn.pack(side="right", pady=8)
 
         # ── 🛠 Extract SQL — direct button on the topbar ────────────────
@@ -1154,7 +1387,7 @@ class TranslatorApp(_BaseTk):
         if not d.get("manual_title"):
             d["title"] = self._doctab_title(d["input"], self._active_doc)
 
-    def _load_doc(self, i):
+    def _load_doc(self, i, translate=True):
         d = self._doctabs[i]
         self._clear_placeholder()
         self.input_box.delete("1.0", "end")
@@ -1167,8 +1400,9 @@ class TranslatorApp(_BaseTk):
         self._refresh_mode_tabs()
         self._set_direction_label()
         self._render_doctabs()
-        self.on_translate()
-        self._schedule_input_highlight()
+        if translate:
+            self.on_translate()
+            self._schedule_input_highlight()
 
     def _switch_doc_tab(self, i):
         if i == self._active_doc or i < 0 or i >= len(self._doctabs):
@@ -2423,6 +2657,56 @@ class TranslatorApp(_BaseTk):
     def open_command_palette(self):
         from .dialogs.command_palette import open_command_palette
         open_command_palette(self)
+
+    def _open_path(self, path):
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                self._toast.show(f"Open this path: {path}", 3000, "info")
+        except Exception:
+            _app_log(f"Could not open path: {path}", sys.exc_info())
+            try:
+                self._toast.show("Could not open path; see translator_app.log", 2500, "error")
+            except Exception:
+                pass
+
+    def open_app_folder(self):
+        self._open_path(BASE_DIR)
+
+    def open_diagnostics_log(self):
+        if not os.path.exists(_APP_LOG):
+            _app_log("Diagnostics log created")
+        self._open_path(_APP_LOG)
+
+    def reset_window_geometry(self):
+        self.geometry(_DEFAULT_GEOMETRY)
+        self._settings["geometry"] = _DEFAULT_GEOMETRY
+        save_settings(self._settings)
+        self._toast.show("Window geometry reset", 1400, "success")
+
+    def clear_saved_tabs(self):
+        ok = messagebox.askyesno(
+            "Clear saved tabs",
+            "Clear saved document tabs and start with one empty tab?\n\n"
+            "Schema, user map, exclusions, and history will be kept.",
+            parent=self,
+        )
+        if not ok:
+            return
+        self._doctabs = [{
+            "title": "Tab 1",
+            "input": "",
+            "mode": "inline",
+            "direction": "forward",
+            "manual_title": False,
+        }]
+        self._active_doc = 0
+        self._settings["doc_tabs"] = [dict(self._doctabs[0])]
+        self._settings["active_doc"] = 0
+        save_settings(self._settings)
+        self._load_doc(0)
+        self._toast.show("Saved tabs cleared", 1400, "success")
 
     # ── Hover tooltips on buttons (delayed show, hide on leave) ───────────────
     def _attach_tooltip(self, widget, text, delay_ms=500):

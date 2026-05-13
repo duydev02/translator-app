@@ -53,10 +53,16 @@ from ...logsql import (
     tokenize_sql_for_highlight,
 )
 from ...themes import THEMES
+from .placement import geometry_near_parent, place_dialog
 
 
 # Maximum recent log paths to keep in the dropdown.
 MAX_RECENT_PATHS = 8
+DEFAULT_DIALOG_SIZE = (1240, 820)
+
+
+def _dialog_geometry_near_parent(parent, width=DEFAULT_DIALOG_SIZE[0], height=DEFAULT_DIALOG_SIZE[1]):
+    return geometry_near_parent(parent, width, height, min_width=960, min_height=600)
 
 
 def open_log_sql_dialog(app):
@@ -71,7 +77,7 @@ def open_log_sql_dialog(app):
     dlg = tk.Toplevel(app)
     app._log_sql_dialog = dlg
     dlg.title("Extract SQL from log")
-    dlg.geometry("1240x820")
+    place_dialog(dlg, app, *DEFAULT_DIALOG_SIZE, min_width=960, min_height=600)
     dlg.minsize(960, 600)
     dlg.configure(bg=t["bg"])
     dlg.transient(app)
