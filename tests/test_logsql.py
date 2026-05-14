@@ -448,6 +448,34 @@ def test_pretty_sql_handles_empty_input():
     assert pretty_sql("") == ""
 
 
+def test_pretty_sql_keeps_between_and_inline():
+    """The `AND` inside `BETWEEN x AND y` is syntactic, not a logical
+    connective — it must stay on the same line as the BETWEEN clause,
+    not get pushed to its own indented line."""
+    sql = "SELECT * FROM T WHERE YUKO_DT BETWEEN '20240101' AND '20241231'"
+    out = pretty_sql(sql)
+    # The BETWEEN ... AND ... stays on one line.
+    assert "BETWEEN '20240101' AND '20241231'" in out
+    # Specifically, no break inserted before this particular AND.
+    assert "\n    AND '20241231'" not in out
+
+
+def test_pretty_sql_still_breaks_real_connectives_after_between():
+    """A later logical AND in the same WHERE — distinct from BETWEEN's
+    syntactic AND — should still break to its own indented line."""
+    sql = (
+        "SELECT * FROM T WHERE YUKO_DT BETWEEN ? AND ? "
+        "AND DELETE_FG = '0' AND TENPO_CD = ?"
+    )
+    out = pretty_sql(sql)
+    # BETWEEN's AND stays inline.
+    assert "BETWEEN ? AND ?" in out
+    # The subsequent AND `AND DELETE_FG` and `AND TENPO_CD` ARE logical
+    # connectives — they break.
+    assert "\n    AND DELETE_FG" in out
+    assert "\n    AND TENPO_CD" in out
+
+
 def test_pretty_sql_does_not_break_into_substrings():
     """`INTO` keyword should not match inside `IDOSAKI_TENPO_CD` etc."""
     sql = "SELECT IDOSAKI_TENPO_CD FROM TBL WHERE IDOSAKI_TENPO_CD = 1"

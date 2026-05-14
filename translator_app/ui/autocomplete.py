@@ -188,6 +188,16 @@ class Autocomplete:
         )
         self.listbox.pack(fill="both", expand=True)
         self.listbox.bind("<Double-Button-1>", lambda e: self._accept_current())
+        # Footer hint — users currently have to discover the keys.
+        # Small, muted, fixed height; _reposition accounts for its height
+        # when sizing the popup.
+        self._hint_lbl = tk.Label(
+            inner, text="↓↑ nav · Tab/Enter accept · Esc close",
+            font=self.app._small,
+            bg=t["muted_bg"], fg=t["fg_muted"],
+            anchor="w", padx=6, pady=1,
+        )
+        self._hint_lbl.pack(fill="x", side="bottom")
         # Don't steal focus — keep the caret in the Text widget so typing
         # continues to update the suggestions.
 
@@ -201,8 +211,8 @@ class Autocomplete:
         if not bbox:
             return
         x, y, _w, h = bbox
-        rx = self.text.winfo_rootx() + x
-        ry = self.text.winfo_rooty() + y + h + 2
+        caret_rx = self.text.winfo_rootx() + x
+        caret_ry = self.text.winfo_rooty() + y
         # Clamp to screen.
         sw = self.popup.winfo_screenwidth()
         sh = self.popup.winfo_screenheight()
@@ -212,15 +222,36 @@ class Autocomplete:
         except Exception:
             char_w = 8
         long_chars = max((len(s) for s in self._suggestions), default=20)
-        pop_w  = min(max(140, (long_chars + 2) * char_w), 480)
+        # Make sure the hint line fits too — it's typically the limiting
+        # width when there are short suggestions.
+        try:
+            hint_w = self.app._small.measure(self._hint_lbl.cget("text"))
+        except Exception:
+            hint_w = 240
+        pop_w  = min(max(160, (long_chars + 2) * char_w, hint_w + 16), 520)
         try:
             row_h = self.app._mono.metrics("linespace") + 2
         except Exception:
             row_h = 16
+        try:
+            hint_h = self.app._small.metrics("linespace") + 4
+        except Exception:
+            hint_h = 14
         rows = min(len(self._suggestions), _MAX_SUGGESTIONS)
-        pop_h = max(40, rows * row_h + 4)
-        rx = max(0, min(rx, sw - pop_w - 4))
-        ry = max(0, min(ry, sh - pop_h - 4))
+        pop_h = max(40, rows * row_h + hint_h + 6)
+
+        # Preferred: anchor below the caret with a small gap.
+        ry_below = caret_ry + h + 2
+        # If the popup would run off the bottom of the screen, flip it
+        # above the caret instead so the user can still see what they're
+        # typing. We only flip when there's actually more room above.
+        room_below = sh - (ry_below + pop_h)
+        room_above = caret_ry - pop_h - 2
+        if room_below < 0 and room_above > room_below:
+            ry = max(0, caret_ry - pop_h - 2)
+        else:
+            ry = max(0, min(ry_below, sh - pop_h - 4))
+        rx = max(0, min(caret_rx, sw - pop_w - 4))
         try:
             self.popup.wm_geometry(f"{pop_w}x{pop_h}+{rx}+{ry}")
         except Exception:

@@ -5,11 +5,57 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **Filter dialog: dirty indicator + discard-changes guard** — while
+  editing the Filter dialog, a small "● Unapplied changes" label appears
+  in the footer the moment your selection differs from what's currently
+  active. Closing with unsaved edits prompts to confirm. Removes the
+  silent failure mode where ticking checkboxes and forgetting to hit
+  Apply left translated output mismatched against the dialog.
+- **Tab lock icon (🔒) for manually-renamed tabs** — once a tab title
+  is set explicitly (double-click rename, snippet load, Extract SQL →
+  Send to new tab, Duplicate), a small 🔒 prefix shows so you can tell
+  at a glance which tabs won't auto-rename from their content. New
+  right-click menu entry **Auto-name from content** clears the lock and
+  immediately re-derives the title from the current input.
+- **Treeview cell tooltips** in Schema Browser + Extract SQL list —
+  hover a clipped cell (DAO name, Tables column, etc.) and a tooltip
+  shows the full value. Only fires when the rendered text would
+  actually overflow its column, so short fully-visible values stay
+  quiet. Wired via a new reusable `install_treeview_cell_tooltip`
+  helper in `widgets.py`.
+- **Extract SQL → Send to new tab** — a second action button (and a
+  `Ctrl+click` shortcut on the existing *Send to translator input*)
+  opens the runnable SQL in a fresh doc tab instead of stomping the
+  active one. The new tab is auto-titled with the source statement
+  (e.g. `PdaDataSelectDao · id=189369c1`) and pinned with 🔒 so it
+  doesn't get overwritten by auto-naming.
+- **Right-click in input — User-Map quick-add for the caret word** —
+  if there's no selection but the caret sits on a known table or
+  column identifier, the right-click menu now offers `🖉 Add 'X' →
+  User Map…` for that word. The prompt prefills with (in order) any
+  existing User-Map override, then the schema's current logical
+  name — so confirming or editing is one keystroke. Submitting an
+  empty value removes an existing override (instead of doing nothing).
+- **Autocomplete polish** — popup now shows a footer hint
+  (`↓↑ nav · Tab/Enter accept · Esc close`) so users discover the
+  keys without trial and error, and flips above the caret when it
+  would otherwise overflow the bottom of the screen (was just
+  clamped, causing it to hide what the user was typing).
+- **F1 help cheat-sheet: Mouse / right-click section** — documents
+  the input / output / tab right-click menus + drag-drop, all of
+  which were previously discoverable only by trial.
 - **Schema-aware autocomplete** in the input box — typing 2+ characters
   of a known table or column pops a small list of matches (tables first,
   then columns, deduped, capped at 10). `↓`/`↑` navigate, `Tab` / `Enter`
   / `→` accept, `Esc` or click-elsewhere dismiss. Reads the live indexes
   so User Map overrides are picked up immediately.
+
+### Fixed
+- **`pretty_sql()` no longer splits `BETWEEN x AND y`** — the `AND`
+  there is syntactic, not a logical connective. The new formatter
+  back-scans for the nearest barrier keyword (BETWEEN / AND / OR /
+  WHERE / HAVING / ON / WHEN / CASE) before deciding to break — if
+  it lands on BETWEEN, the AND stays inline.
 - **84 new tests** (163 total): `tests/test_designdoc_extras.py` covers
   `_pretty_sql`, `_is_paren_group`, multi-buffer detection, `_parse_*`
   edge cases, outer-paren stripping, placeholder resolution, and the

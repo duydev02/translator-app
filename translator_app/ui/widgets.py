@@ -138,6 +138,83 @@ class Tooltip:
             self.tw = None
 
 
+def install_treeview_cell_tooltip(tree, tooltip, *, value_fn=None, delay_ms=600):
+    """Wire a hover tooltip on a Treeview's cells so values that overflow
+    their column (Tk silently truncates them with no indication) are
+    readable by hovering.
+
+    `tree`        — the ttk.Treeview instance
+    `tooltip`     — a Tooltip instance (usually `app._tooltip`)
+    `value_fn`    — optional callable `(tree, row_id, column_id) -> str | None`
+                    returning the full text to show. Default reads the
+                    raw cell value via `tree.set(row_id, column_id)`.
+    `delay_ms`    — hover delay before the tooltip appears.
+
+    Only shows the tooltip when the rendered text would actually be
+    clipped — i.e. the cell value is wider than its column. Avoids
+    spam-popping on every short row.
+    """
+    state = {"job": None, "row": None, "col": None}
+
+    def _default_value(t, row_id, col_id):
+        if not row_id or not col_id:
+            return None
+        try:
+            return t.set(row_id, col_id)
+        except tk.TclError:
+            return None
+
+    get_value = value_fn or _default_value
+
+    def _cancel():
+        if state["job"]:
+            try: tree.after_cancel(state["job"])
+            except Exception: pass
+            state["job"] = None
+
+    def _hide():
+        _cancel()
+        try: tooltip.hide()
+        except Exception: pass
+        state["row"] = state["col"] = None
+
+    def _maybe_show(x_root, y_root):
+        row_id, col_id = state["row"], state["col"]
+        text = get_value(tree, row_id, col_id) or ""
+        if not text.strip():
+            return
+        # Only show when the cell value is wider than the visible column
+        # — short, fully-visible values shouldn't pop a tooltip.
+        try:
+            col_w = int(tree.column(col_id, "width"))
+        except (tk.TclError, ValueError):
+            col_w = 0
+        # Rough text width: a tooltip-worth tells us the text overflows.
+        # Using the parent's font (Treeview default) — close enough.
+        try:
+            text_w = font.Font(font=tree.cget("font")).measure(text)
+        except Exception:
+            text_w = len(text) * 7   # cheap fallback
+        if text_w <= col_w - 8:
+            return
+        tooltip.show(text, x_root, y_root)
+
+    def _on_motion(event):
+        row_id = tree.identify_row(event.y)
+        col_id = tree.identify_column(event.x)
+        if row_id != state["row"] or col_id != state["col"]:
+            _hide()
+            state["row"], state["col"] = row_id, col_id
+            if row_id and col_id:
+                # Capture current screen pos so the tooltip lands where the
+                # pointer is, not where it'll be after the delay.
+                xr, yr = event.x_root, event.y_root
+                state["job"] = tree.after(delay_ms, lambda: _maybe_show(xr, yr))
+
+    tree.bind("<Motion>", _on_motion, add="+")
+    tree.bind("<Leave>",  lambda _e: _hide(), add="+")
+
+
 class Toast:
     def __init__(self, parent):
         self.parent = parent

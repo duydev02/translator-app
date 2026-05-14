@@ -456,6 +456,31 @@ _PRETTY_CONNECTIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Backwards-scan helper: when we see an `AND`, decide whether it's a
+# logical connective (break to new line) or part of `BETWEEN x AND y`
+# (keep inline). We look at the closest preceding "barrier" keyword in
+# the masked SQL; if it's BETWEEN, the AND is BETWEEN's syntactic AND.
+# Anything else (WHERE, AND, OR, ON, HAVING, …) means this AND is a
+# real connective.
+_BETWEEN_BARRIER_RE = re.compile(
+    r"\b(BETWEEN|AND|OR|WHERE|HAVING|ON|WHEN|CASE)\b",
+    re.IGNORECASE,
+)
+
+
+def _and_belongs_to_between(masked: str, pos: int) -> bool:
+    """Return True when the `AND` at offset `pos` in `masked` belongs to
+    a `BETWEEN x AND y` construct (so we should NOT break before it)."""
+    # Find the rightmost barrier match before `pos`. We scan all matches
+    # in the prefix and take the last — log files aren't long enough for
+    # this to be a perf issue.
+    last = None
+    for m in _BETWEEN_BARRIER_RE.finditer(masked, 0, pos):
+        last = m
+    if last is None:
+        return False
+    return last.group(1).upper() == "BETWEEN"
+
 
 def pretty_sql(sql: str) -> str:
     """Lightweight SQL prettifier. Inserts newlines before major clauses
@@ -500,6 +525,15 @@ def pretty_sql(sql: str) -> str:
     for m in _PRETTY_JOIN_RE.finditer(masked):
         _emit(m, "\n  ")
     for m in _PRETTY_CONNECTIVE_RE.finditer(masked):
+        # Don't break `AND` that's part of `BETWEEN x AND y` — the AND
+        # there is syntactic glue, not a logical connective. We look
+        # backwards from the AND for the closest barrier keyword; if it
+        # turns out to be BETWEEN (and we haven't crossed another AND/OR
+        # since), this AND belongs to that BETWEEN and stays inline.
+        if m.group(1).upper() == "AND" and _and_belongs_to_between(
+            masked, m.start()
+        ):
+            continue
         _emit(m, "\n    ")
 
     if not edits:

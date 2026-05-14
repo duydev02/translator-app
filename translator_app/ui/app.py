@@ -1410,12 +1410,18 @@ class TranslatorApp(_BaseTk):
         self._capture_active_doc()
         self._load_doc(i)
 
-    def _new_doc_tab(self):
+    def _new_doc_tab(self, *, initial_input: str = "", title: str | None = None):
+        """Create a new doc tab. Optional `initial_input` seeds the input
+        box (used by Extract SQL → Send to new tab). Optional `title` sets
+        a manual title (so it shows the 🔒 lock and won't auto-rename)."""
         self._capture_active_doc()
+        tab_title = title if title else f"Tab {len(self._doctabs) + 1}"
         self._doctabs.append({
-            "title": f"Tab {len(self._doctabs) + 1}", "input": "",
-            "mode": self._mode.get(),
-            "direction": self._direction.get(),
+            "title":        tab_title,
+            "input":        initial_input or "",
+            "mode":         self._mode.get(),
+            "direction":    self._direction.get(),
+            "manual_title": bool(title),
         })
         self._load_doc(len(self._doctabs) - 1)
 
@@ -1452,7 +1458,11 @@ class TranslatorApp(_BaseTk):
             fg = t["accent_fg"] if active else t["fg"]
             frame = tk.Frame(self._doctabs_inner, bg=bg)
             frame.pack(side="left", padx=(0, 4))
-            label = d.get("title") or f"Tab {i + 1}"
+            # Prefix manually-renamed tabs with a 🔒 so users see at a
+            # glance which tabs won't auto-rename from content changes.
+            # Right-click → Auto-name from content clears the lock.
+            title = d.get("title") or f"Tab {i + 1}"
+            label = ("🔒 " + title) if d.get("manual_title") else title
             btn = tk.Button(
                 frame, text=label, font=self._ui_b,
                 relief="flat", padx=10, pady=2, cursor="hand2", bd=0,
@@ -1490,6 +1500,12 @@ class TranslatorApp(_BaseTk):
             bd=0, relief="flat")
         m.add_command(label="Rename",
             command=lambda: self._begin_rename_doc_tab(i, frame, btn))
+        is_manual = bool(self._doctabs[i].get("manual_title"))
+        m.add_command(
+            label="Auto-name from content",
+            state=("normal" if is_manual else "disabled"),
+            command=lambda: self._clear_manual_title(i),
+        )
         m.add_command(label="Duplicate", command=lambda: self._duplicate_doc_tab(i))
         m.add_separator()
         multi = len(self._doctabs) > 1
@@ -1502,6 +1518,21 @@ class TranslatorApp(_BaseTk):
             m.tk_popup(event.x_root, event.y_root)
         finally:
             m.grab_release()
+
+    def _clear_manual_title(self, i):
+        """Drop the 🔒 — clear the manual flag so the tab title resumes
+        auto-naming from content. Re-derives the title from the current
+        input immediately."""
+        if not (0 <= i < len(self._doctabs)):
+            return
+        d = self._doctabs[i]
+        d["manual_title"] = False
+        d["title"] = self._doctab_title(d.get("input", ""), i)
+        self._render_doctabs()
+        try:
+            self._toast.show("Tab will auto-rename from content", 1100, "info")
+        except Exception:
+            pass
 
     def _duplicate_doc_tab(self, i):
         self._capture_active_doc()
@@ -2437,6 +2468,22 @@ class TranslatorApp(_BaseTk):
                 menu.add_separator()
                 menu.add_command(label="🔍  Inspect SQL…", command=self.open_inspect_dialog)
         else:  # input_box
+            # If there's no selection but the caret is on a known schema
+            # identifier, offer the User-Map quick-add for that word. Saves
+            # users from having to highlight it first.
+            if not selected.strip():
+                word = self._word_under_caret(widget)
+                if word and (
+                    word in self.column_index
+                    or word.upper() in self.column_index
+                    or word in self.table_index
+                    or word.upper() in self.table_index
+                ):
+                    menu.add_command(
+                        label=f"🖉  Add '{word}' → User Map…",
+                        command=lambda w=word: self._add_selection_to_user_map(w),
+                    )
+                    menu.add_separator()
             menu.add_command(label="✕  Clear input  (Ctrl+⌫)", command=self.on_clear)
             menu.add_command(label="📋  Save as snippet…",      command=self.open_snippets_dialog)
             menu.add_command(label="📂  Open file…",             command=self.on_open_file)
@@ -2461,30 +2508,87 @@ class TranslatorApp(_BaseTk):
             pass
 
     def _add_selection_to_user_map(self, selected):
-        """Open the User Map with the selected text pre-populated as the
-        physical name, so the user can quickly add an override."""
-        # Lightweight prompt: ask for the logical name only; physical comes
-        # from the selection.
+        """Open a lightweight prompt to set a User Map override for
+        `selected`. The text field is prefilled with (in priority order):
+
+          1. the existing User-Map override for this phys (so editing is
+             one keystroke);
+          2. the schema's current logical name (so confirming is one
+             keystroke);
+          3. empty (the user is naming something new).
+
+        Re-merges and re-translates on save."""
         from tkinter import simpledialog
-        phys = selected.strip()
+        phys = (selected or "").strip()
         if not phys:
             return
+        # Pre-fill: existing override → schema logical → "".
+        existing = (self._user_map.get("columns") or {}).get(phys, "")
+        schema_logical = ""
+        if not existing:
+            entries = self.column_index.get(phys) or self.column_index.get(phys.upper())
+            if entries:
+                # Use _most_common to pick the dominant logical name across
+                # whatever schemas this column lives in. Falls back to "".
+                try:
+                    from ..schema import _most_common
+                    schema_logical = _most_common(phys, entries) or ""
+                    if schema_logical == phys:
+                        schema_logical = ""
+                except Exception:
+                    schema_logical = ""
+        prefill = existing or schema_logical
+
         logical = simpledialog.askstring(
             "Add to User Map",
             f"Logical name for '{phys}':",
             parent=self,
+            initialvalue=prefill,
         )
-        if not logical or not logical.strip():
-            return
+        if logical is None:
+            return  # cancelled
+        logical = logical.strip()
         cols = self._user_map.setdefault("columns", {})
-        cols[phys] = logical.strip()
+        if not logical:
+            # Empty input → treat as removal (only if there's an existing
+            # override to remove; otherwise just bail).
+            if phys in cols:
+                del cols[phys]
+                from ..config import save_user_map
+                try: save_user_map(self._user_map)
+                except Exception: pass
+                try: self._load_data(); self.on_translate()
+                except Exception: pass
+                self._toast.show(f"Removed User-Map override for {phys}", 1300, "success")
+            return
+        cols[phys] = logical
         from ..config import save_user_map
         try: save_user_map(self._user_map)
         except Exception: pass
-        # Re-merge so the override is picked up immediately
         try: self._load_data(); self.on_translate()
         except Exception: pass
         self._toast.show(f"User Map: {phys} → {logical}", 1300, "success")
+
+    def _word_under_caret(self, widget) -> str:
+        """Return the identifier-like word the caret sits inside, or "".
+        Used to offer 'Add to User Map' from the right-click menu when
+        there's no selection but the caret is parked inside a column or
+        table name."""
+        try:
+            line, char = map(int, widget.index("insert").split("."))
+            text = widget.get(f"{line}.0", f"{line}.end")
+        except (tk.TclError, ValueError):
+            return ""
+        if not text:
+            return ""
+        # Expand left and right while we're inside [A-Za-z0-9_].
+        import re as _re
+        m = _re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+        # Find the match (if any) that contains `char`.
+        for mm in m.finditer(text):
+            if mm.start() <= char <= mm.end():
+                return mm.group(0)
+        return ""
 
     def _add_exclusion(self, text):
         text = text.strip("\r\n")

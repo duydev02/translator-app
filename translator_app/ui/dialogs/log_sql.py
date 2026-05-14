@@ -53,6 +53,7 @@ from ...logsql import (
     tokenize_sql_for_highlight,
 )
 from ...themes import THEMES
+from ..widgets import install_treeview_cell_tooltip
 from .placement import geometry_near_parent, place_dialog
 
 
@@ -444,6 +445,12 @@ def open_log_sql_dialog(app):
     tree_sb.configure(command=tree.yview, bg=t["bg"], troughcolor=t["bg"], bd=0)
     tree.pack(side="left", fill="both", expand=True)
     tree_sb.pack(side="right", fill="y")
+
+    # Hover tooltips on truncated cells — DAO short name, Tables, even
+    # the action-header row's label often run past their column width.
+    # The custom value_fn pulls the full action label from `tags` for
+    # parent rows (the header text is stored in the `dao` column slot).
+    install_treeview_cell_tooltip(tree, app._tooltip)
     body.add(list_pane, minsize=180, height=320)
 
     # Bottom pane — detail notebook (SQL / Params / Result)
@@ -581,8 +588,25 @@ def open_log_sql_dialog(app):
     direct_btn.pack(side="left", padx=(0, 6))
 
     _btn(actions, "Close", dlg.destroy).pack(side="right")
-    _btn(actions, "Send to translator input",
-         lambda: _send_to_translator(), accent=True).pack(side="right", padx=(0, 6))
+    send_btn = _btn(actions, "Send to translator input",
+         lambda: _send_to_translator(), accent=True)
+    send_btn.pack(side="right", padx=(0, 6))
+    # Ctrl+click "Send" → new tab. Power-user shortcut on the same button
+    # avoids cluttering the action bar with a second button. The visible
+    # "Send to new tab" button below covers the discoverable path.
+    send_btn.bind("<Control-Button-1>", lambda _e: _send_to_translator(new_tab=True))
+    new_tab_btn = _btn(actions, "Send to new tab",
+        lambda: _send_to_translator(new_tab=True))
+    new_tab_btn.pack(side="right", padx=(0, 6))
+    try:
+        app._attach_tooltip(
+            new_tab_btn,
+            "Open the runnable SQL in a fresh translator tab instead of\n"
+            "replacing the active one. Useful for side-by-side comparison.\n"
+            "Tip: Ctrl+click 'Send to translator input' does the same.",
+        )
+    except Exception:
+        pass
     _btn(actions, "Copy result", lambda: _copy_result()).pack(side="right", padx=(0, 6))
 
     # ── Helpers ─────────────────────────────────────────────────────────
@@ -958,20 +982,46 @@ def open_log_sql_dialog(app):
         except Exception:
             _notice("Clipboard copy failed", accent=False)
 
-    def _send_to_translator():
+    def _send_to_translator(*, new_tab: bool = False):
         text = _current_result_text()
         if not text.strip():
             _notice("Nothing to send — pick a statement first", accent=False)
             return
         try:
-            app.input_box.configure(state="normal")
-            app.input_box.delete("1.0", "end")
-            app.input_box.insert("1.0", text)
-            app.on_translate()
-            app._toast.show("Sent SQL into translator input", 1300, "success")
-            _notice("Sent into translator input", accent=True)
+            if new_tab:
+                # Open a fresh doc tab so the active one isn't stomped —
+                # useful when comparing the extracted SQL with what's
+                # already in the translator. Title hints at the source so
+                # the user can tell tabs apart at a glance.
+                title = _suggest_send_tab_title()
+                app._new_doc_tab(initial_input=text, title=title)
+                app._toast.show(f"Sent to new tab: {title}", 1500, "success")
+                _notice("Sent to a new tab", accent=True)
+            else:
+                app.input_box.configure(state="normal")
+                app.input_box.delete("1.0", "end")
+                app.input_box.insert("1.0", text)
+                app.on_translate()
+                app._toast.show("Sent SQL into translator input", 1300, "success")
+                _notice("Sent into translator input", accent=True)
         except Exception:
             _notice("Couldn't reach translator input", accent=False)
+
+    def _suggest_send_tab_title() -> str:
+        """Build a short, recognisable tab title from the current
+        selection. Examples: `id=189369c1`, `PdaDataSelectDao#search`,
+        `Direct extract`."""
+        if state["direct"]:
+            return "Direct extract"
+        sel = state.get("selected")
+        if not sel:
+            return "Extracted SQL"
+        parts = []
+        if sel.dao_short:
+            parts.append(sel.dao_short)
+        if sel.id:
+            parts.append(f"id={sel.id}")
+        return " · ".join(parts) if parts else "Extracted SQL"
 
     # ── Direct mode (paste SQL + params, no log file) ─────────────────
     direct_panel = tk.Frame(dlg, bg=t["bg"])
