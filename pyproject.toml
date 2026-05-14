@@ -33,6 +33,12 @@ exclude = ["build", "dist", "__pycache__", ".venv", "venv"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.setuptools]
+py-modules = ["translator"]
+
+[tool.setuptools.packages.find]
+include = ["translator_app*"]
+
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 ignore = [

@@ -2,13 +2,14 @@ import tkinter as tk
 from tkinter import scrolledtext
 
 from ...themes import THEMES
+from .placement import place_dialog
 
 
 def show_help_dialog(app):
     t = THEMES[app._theme]
     dlg = tk.Toplevel(app)
     dlg.title("Keyboard Shortcuts & Features")
-    dlg.geometry("640x520")
+    place_dialog(dlg, app, 640, 520, min_width=520, min_height=420)
     dlg.configure(bg=t["bg"])
     dlg.transient(app); dlg.grab_set()
 

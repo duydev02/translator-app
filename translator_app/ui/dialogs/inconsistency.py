@@ -5,6 +5,7 @@ from tkinter import ttk, filedialog
 from ...config import save_user_map
 from ...themes import THEMES
 from ...translate import find_column_inconsistencies
+from .placement import place_dialog
 
 
 def open_inconsistency_dialog(app):
@@ -13,7 +14,7 @@ def open_inconsistency_dialog(app):
 
     dlg = tk.Toplevel(app)
     dlg.title("Column Name Inconsistencies")
-    dlg.geometry("820x580")
+    place_dialog(dlg, app, 820, 580, min_width=640, min_height=460)
     dlg.minsize(640, 460)
     dlg.configure(bg=t["bg"])
     dlg.transient(app); dlg.grab_set()

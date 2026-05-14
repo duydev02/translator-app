@@ -16,6 +16,7 @@ Fuzzy matching: characters of the query must appear in order in the label
 import tkinter as tk
 
 from ...themes import THEMES
+from .placement import geometry_near_parent, place_dialog
 
 
 def open_command_palette(app):
@@ -119,17 +120,9 @@ def open_command_palette(app):
     # Keep typing in the entry even after clicking the list.
     listbox.bind("<Button-1>", lambda e: dlg.after_idle(entry.focus_set), add="+")
 
-    # Position: centred horizontally near the top of the app window.
-    app.update_idletasks()
-    aw, ah = app.winfo_width(), app.winfo_height()
-    ax, ay = app.winfo_rootx(), app.winfo_rooty()
     pop_w, pop_h = 640, 360
-    px = ax + max(0, (aw - pop_w) // 2)
-    py = ay + 80
-    sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
-    px = max(4, min(px, sw - pop_w - 4))
-    py = max(4, min(py, sh - pop_h - 4))
-    dlg.wm_geometry(f"{pop_w}x{pop_h}+{px}+{py}")
+    dlg.wm_geometry(geometry_near_parent(app, pop_w, pop_h, min_width=pop_w, min_height=pop_h, y_bias=-220))
+    place_dialog(dlg, app, pop_w, pop_h, min_width=pop_w, min_height=pop_h, y_bias=-220)
     dlg.focus_force()
     entry.focus_set()
     _refresh()

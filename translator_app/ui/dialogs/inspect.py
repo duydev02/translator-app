@@ -30,6 +30,7 @@ from tkinter import ttk
 
 from ...themes import THEMES
 from ...designdoc import compute_design_details
+from .placement import place_dialog
 
 
 # ── Public entry point ──────────────────────────────────────────────────────
@@ -63,7 +64,7 @@ class _InspectDialog:
         win = tk.Toplevel(app)
         self.win = win
         win.title("Inspect SQL")
-        win.geometry("1080x720")
+        place_dialog(win, app, 1080, 720, min_width=900, min_height=560)
         win.configure(bg=self.t["bg"])
         win.transient(app)
 
