@@ -15,7 +15,9 @@ import types
 import pytest
 
 from translator_app.paths import CUSTOM_SCHEMA
+from translator_app.ui.app import _DEFAULT_GEOMETRY, _sanitize_settings
 from translator_app.ui.dialogs.command_palette import _fuzzy_filter, _fuzzy_score
+from translator_app.ui.dialogs.log_sql import _dialog_geometry_near_parent
 from translator_app.ui.dialogs.snippets import _default_name
 from translator_app.ui.dialogs.schema_browser import (
     _build_column_rows_all,
@@ -134,6 +136,100 @@ SELECT 1
 
 
 # ── schema_browser: data builders ────────────────────────────────────────────
+class TestStartupSettingsSanitizer:
+    def test_sanitize_settings_falls_back_from_bad_values(self):
+        settings = _sanitize_settings({
+            "theme": "neon",
+            "mode": "table",
+            "direction": "sideways",
+            "font_size": "huge",
+            "geometry": "1x1+0+0",
+            "active_doc": "wat",
+            "doc_tabs": [{"input": 123, "mode": "bad", "direction": "bad"}],
+        })
+
+        assert settings["theme"] == "light"
+        assert settings["mode"] == "inline"
+        assert settings["direction"] == "forward"
+        assert settings["font_size"] == 10
+        assert settings["geometry"] == _DEFAULT_GEOMETRY
+        assert settings["active_doc"] == 0
+        assert settings["doc_tabs"][0]["input"] == ""
+
+    def test_sanitize_settings_preserves_valid_geometry_and_tab(self):
+        settings = _sanitize_settings({
+            "geometry": "1280x720+10+20",
+            "mode": "designdoc",
+            "direction": "reverse",
+            "doc_tabs": [{
+                "title": "Work",
+                "input": "SELECT 1",
+                "mode": "designdoc",
+                "direction": "reverse",
+                "manual_title": True,
+            }],
+        })
+
+        assert settings["geometry"] == "1280x720+10+20"
+        assert settings["doc_tabs"][0]["input"] == "SELECT 1"
+        assert settings["doc_tabs"][0]["manual_title"] is True
+
+
+class TestLogSqlDialogPlacement:
+    def test_geometry_centers_on_parent(self):
+        parent = types.SimpleNamespace(
+            update_idletasks=lambda: None,
+            winfo_screenwidth=lambda: 1920,
+            winfo_screenheight=lambda: 1080,
+            winfo_vrootx=lambda: 0,
+            winfo_vrooty=lambda: 0,
+            winfo_vrootwidth=lambda: 1920,
+            winfo_vrootheight=lambda: 1080,
+            winfo_rootx=lambda: 100,
+            winfo_rooty=lambda: 80,
+            winfo_width=lambda: 1400,
+            winfo_height=lambda: 900,
+        )
+
+        assert _dialog_geometry_near_parent(parent) == "1240x820+180+120"
+
+    def test_geometry_is_clamped_to_screen(self):
+        parent = types.SimpleNamespace(
+            update_idletasks=lambda: None,
+            winfo_screenwidth=lambda: 1366,
+            winfo_screenheight=lambda: 768,
+            winfo_vrootx=lambda: 0,
+            winfo_vrooty=lambda: 0,
+            winfo_vrootwidth=lambda: 1366,
+            winfo_vrootheight=lambda: 768,
+            winfo_rootx=lambda: 1200,
+            winfo_rooty=lambda: 700,
+            winfo_width=lambda: 1000,
+            winfo_height=lambda: 700,
+        )
+
+        assert _dialog_geometry_near_parent(parent) == "1240x688+126+80"
+
+    def test_geometry_stays_with_parent_on_non_primary_monitor(self):
+        parent = types.SimpleNamespace(
+            update_idletasks=lambda: None,
+            winfo_screenwidth=lambda: 1920,
+            winfo_screenheight=lambda: 1080,
+            # Some Windows/Tk setups report only the primary monitor as vroot.
+            winfo_vrootx=lambda: 0,
+            winfo_vrooty=lambda: 0,
+            winfo_vrootwidth=lambda: 1920,
+            winfo_vrootheight=lambda: 1080,
+            # Parent lives on a monitor to the right of primary.
+            winfo_rootx=lambda: 2200,
+            winfo_rooty=lambda: 120,
+            winfo_width=lambda: 1400,
+            winfo_height=lambda: 900,
+        )
+
+        assert _dialog_geometry_near_parent(parent) == "1240x820+2280+160"
+
+
 def _mock_app(table_index, column_index):
     """Build a stub object that the data builders can read."""
     return types.SimpleNamespace(

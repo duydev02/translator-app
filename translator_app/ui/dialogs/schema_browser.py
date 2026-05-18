@@ -20,6 +20,8 @@ from tkinter import ttk
 
 from ...themes import THEMES
 from ...paths import CUSTOM_SCHEMA
+from ..widgets import install_treeview_cell_tooltip
+from .placement import place_dialog
 
 
 def open_schema_browser(app, name_filter=None):
@@ -44,7 +46,7 @@ def open_schema_browser(app, name_filter=None):
     dlg = tk.Toplevel(app)
     app._schema_browser_dialog = dlg
     dlg.title("Schema Browser")
-    dlg.geometry("1080x680")
+    place_dialog(dlg, app, 1080, 680, min_width=900, min_height=560)
     dlg.configure(bg=t["bg"])
     dlg.transient(app)
 
@@ -181,6 +183,12 @@ def open_schema_browser(app, name_filter=None):
     cols_sb.configure(command=cols_tree.yview, bg=t["bg"], troughcolor=t["bg"], bd=0)
     cols_tree.pack(side="left", fill="both", expand=True)
     cols_sb.pack(side="right", fill="y")
+
+    # Hover tooltips on truncated cells — phys/logical names and the
+    # "other tables" list are often wider than the column. Without this,
+    # users have to drag-resize columns to read clipped values.
+    install_treeview_cell_tooltip(tables_tree, app._tooltip)
+    install_treeview_cell_tooltip(cols_tree,   app._tooltip)
 
     # ── Build the dataset once
     tables = _build_table_rows(app)

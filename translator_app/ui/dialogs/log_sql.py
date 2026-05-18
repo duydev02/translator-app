@@ -53,10 +53,17 @@ from ...logsql import (
     tokenize_sql_for_highlight,
 )
 from ...themes import THEMES
+from ..widgets import install_treeview_cell_tooltip
+from .placement import geometry_near_parent, place_dialog
 
 
 # Maximum recent log paths to keep in the dropdown.
 MAX_RECENT_PATHS = 8
+DEFAULT_DIALOG_SIZE = (1240, 820)
+
+
+def _dialog_geometry_near_parent(parent, width=DEFAULT_DIALOG_SIZE[0], height=DEFAULT_DIALOG_SIZE[1]):
+    return geometry_near_parent(parent, width, height, min_width=960, min_height=600)
 
 
 def open_log_sql_dialog(app):
@@ -71,7 +78,7 @@ def open_log_sql_dialog(app):
     dlg = tk.Toplevel(app)
     app._log_sql_dialog = dlg
     dlg.title("Extract SQL from log")
-    dlg.geometry("1240x820")
+    place_dialog(dlg, app, *DEFAULT_DIALOG_SIZE, min_width=960, min_height=600)
     dlg.minsize(960, 600)
     dlg.configure(bg=t["bg"])
     dlg.transient(app)
@@ -110,11 +117,12 @@ def open_log_sql_dialog(app):
     #   Row 0: chip strip (one chip per recent path) + [+ Add] + [Reload] + [☑ Auto]
     #   Row 1: full active-path display (read-only, monospace) for context
     header = tk.Frame(dlg, bg=t["bg"])
-    header.pack(fill="x", padx=14, pady=(12, 4))
+    header.pack(fill="x", padx=14, pady=(14, 6))
 
-    # Row 0 — chip strip + actions
+    # Row 0 — chip strip + actions. Vertical padding (`pady=4`) gives
+    # the row more breathing room so the chips don't feel cramped.
     chip_row = tk.Frame(header, bg=t["bg"])
-    chip_row.pack(fill="x")
+    chip_row.pack(fill="x", pady=(0, 2))
 
     chip_strip = tk.Frame(chip_row, bg=t["bg"])
     chip_strip.pack(side="left", fill="x", expand=True)
@@ -126,58 +134,153 @@ def open_log_sql_dialog(app):
     auto_reload_var = tk.BooleanVar(value=bool(settings.get("auto_reload", True)))
 
     # Row 1 — readout of the active path so the user knows what's loaded.
+    # Indented slightly so it reads as a subtitle under the chip row.
     path_var = tk.StringVar(value=settings.get("active_path", ""))
     active_path_lbl = tk.Label(
         header, textvariable=path_var, font=app._mono,
-        bg=t["bg"], fg=t["fg_muted"], anchor="w",
+        bg=t["bg"], fg=t["fg_muted"], anchor="w", padx=4,
     )
-    active_path_lbl.pack(fill="x", pady=(2, 0))
+    active_path_lbl.pack(fill="x", pady=(4, 0))
 
-    def _project_short_name(path: str) -> str:
-        """Last 2 path segments before the filename — enough to identify
-        a sub-project at a glance, e.g. `mdw_lawmaster…/log`. Falls back
-        to the basename for short paths."""
+    # Persistent per-path aliases (right-click → Rename…). Lets users
+    # pin "lawdailyorder PROD" vs "lawdailyorder DEV" without staring
+    # at identical-looking paths.
+    settings.setdefault("aliases", {})
+
+    # Common patterns in this codebase that add no information to the
+    # chip label. We strip them so e.g.
+    # `D:/…/mdw-lawdailyorder-web/log/stclibApp.log` → `lawdailyorder`.
+    _STRIP_PREFIXES = ("mdw-", "mdw_", "mkm-", "mkm_")
+    _STRIP_SUFFIXES = ("-web", "_web", "-app", "_app", "-service", "_service")
+
+    def _auto_short_name(path: str) -> str:
+        """Distill a path into the smallest distinguishing label.
+
+        Strategy: walk up from the filename until we hit a path segment
+        that isn't `log` / `logs` / `tmp` / `out` — that's typically the
+        project folder. Then strip the common prefix/suffix noise
+        (`mdw-`, `-web`, …) to leave just the project identifier."""
         if not path:
             return "?"
         norm = path.replace("\\", "/").rstrip("/")
         parts = [p for p in norm.split("/") if p]
-        if len(parts) >= 3:
-            return f".../{parts[-3]}/{parts[-2]}"
-        if len(parts) >= 2:
-            return f".../{parts[-2]}"
-        return parts[-1] if parts else path
+        if not parts:
+            return path
+        skip_dirs = {"log", "logs", "tmp", "out", "output"}
+        # Skip the filename, then any boilerplate dirs.
+        idx = len(parts) - 2  # parent of the file
+        while idx > 0 and parts[idx].lower() in skip_dirs:
+            idx -= 1
+        candidate = parts[idx] if idx >= 0 else parts[-1]
+        # Strip common prefixes/suffixes once each.
+        cl = candidate
+        for p in _STRIP_PREFIXES:
+            if cl.lower().startswith(p):
+                cl = cl[len(p):]
+                break
+        for s in _STRIP_SUFFIXES:
+            if cl.lower().endswith(s):
+                cl = cl[: -len(s)]
+                break
+        # Don't return empty — fall back to the original segment if we
+        # accidentally stripped it down to nothing.
+        return cl or candidate or parts[-1]
+
+    def _project_short_name(path: str) -> str:
+        """Resolved short label for a path: explicit alias if set,
+        otherwise the auto-stripped name."""
+        if not path:
+            return "?"
+        alias = (settings.get("aliases") or {}).get(path)
+        if alias:
+            return alias
+        return _auto_short_name(path)
 
     chip_widgets: list[tk.Widget] = []
+    # path → most-recently-observed statement count. Filled by
+    # _on_path_chosen after a parse; rendered as a `(N)` badge on the
+    # chip so users see at a glance which projects have data.
+    chip_counts: dict[str, int] = {}
+
+    def _format_chip_label(path: str, idx: int, is_active: bool) -> str:
+        """Build the chip display string:
+            ▸ 1 lawdailyorder (47)        ← active, populated
+              2 corepkgshiire             ← inactive, not yet loaded
+            ⚠ 3 stale-path                ← path missing on disk
+        Active = leading ▸, stale = leading ⚠. Number is the Alt+N
+        hotkey so power users can switch without the mouse."""
+        short = _project_short_name(path)
+        exists = bool(path) and os.path.exists(path)
+        prefix = "▸ " if is_active else ("⚠ " if not exists else "  ")
+        # Alt+1..9 only; for #10+ we skip the digit (rare but defensive).
+        digit = f"{idx + 1} " if idx < 9 else "  "
+        count = chip_counts.get(path)
+        suffix = f"  ({count})" if count is not None else ""
+        return f"{prefix}{digit}{short}{suffix}"
 
     def _redraw_chips():
         """Rebuild the chip strip from settings['recent_paths']. The
-        active chip is highlighted; click switches; right-click removes."""
+        active chip is highlighted; click switches; right-click for
+        Rename / Remove / Open folder; Alt+N selects by index."""
         for w in chip_widgets:
             w.destroy()
         chip_widgets.clear()
         recents = settings.get("recent_paths") or []
         active = settings.get("active_path") or ""
-        for path in recents:
+        for idx, path in enumerate(recents):
             is_active = (path == active)
-            short = _project_short_name(path)
+            exists = bool(path) and os.path.exists(path)
+            label = _format_chip_label(path, idx, is_active)
+            # Color scheme:
+            #   active   → accent foreground + bg
+            #   stale    → danger foreground + muted bg
+            #   normal   → muted on muted
+            if is_active:
+                bg, fg = t["accent"], t["accent_fg"]
+            elif not exists:
+                bg, fg = t["muted_bg"], t.get("danger", "#c14a4a")
+            else:
+                bg, fg = t["muted_bg"], t["muted_fg"]
             chip = tk.Button(
-                chip_strip, text=short, font=app._small,
-                relief="flat", bd=0, padx=10, pady=3, cursor="hand2",
-                bg=(t["accent"] if is_active else t["muted_bg"]),
-                fg=(t["accent_fg"] if is_active else t["muted_fg"]),
-                activebackground=(t["accent"] if is_active else t["muted_bg"]),
-                activeforeground=(t["accent_fg"] if is_active else t["muted_fg"]),
+                chip_strip, text=label, font=app._small,
+                relief="flat", bd=0, padx=10, pady=4, cursor="hand2",
+                bg=bg, fg=fg,
+                activebackground=bg, activeforeground=fg,
                 command=lambda p=path: _switch_to_path(p),
             )
-            chip.pack(side="left", padx=(0, 4), pady=2)
-            # Tooltip = full path so users can verify which one's which.
+            chip.pack(side="left", padx=(0, 6), pady=2)
+
+            # Rich tooltip: full path + hotkey + load status. Helps
+            # users disambiguate near-identically-named projects.
+            tip_lines = [path]
+            if idx < 9:
+                tip_lines.append(f"Hotkey: Alt+{idx + 1}")
+            cnt = chip_counts.get(path)
+            if cnt is not None:
+                tip_lines.append(f"Loaded: {cnt} statements")
+            if not exists:
+                tip_lines.append("⚠ File not found on disk")
             try:
-                app._attach_tooltip(chip, path)
+                app._attach_tooltip(chip, "\n".join(tip_lines))
             except Exception:
                 pass
 
-            # Right-click → small menu: Remove from list / Reveal folder.
-            menu = tk.Menu(chip, tearoff=0)
+            # Right-click → Rename / Remove / Reveal.
+            menu = tk.Menu(chip, tearoff=0,
+                bg=t["surface"], fg=t["fg"],
+                activebackground=t["accent"], activeforeground=t["accent_fg"],
+                bd=0, relief="flat")
+            menu.add_command(
+                label="Rename…",
+                command=lambda p=path: _rename_chip(p),
+            )
+            alias_set = bool((settings.get("aliases") or {}).get(path))
+            menu.add_command(
+                label="Reset to auto-name",
+                state=("normal" if alias_set else "disabled"),
+                command=lambda p=path: _reset_alias(p),
+            )
+            menu.add_separator()
             menu.add_command(
                 label="Remove from recent paths",
                 command=lambda p=path: _remove_recent(p),
@@ -190,6 +293,35 @@ def open_log_sql_dialog(app):
                       m.tk_popup(e.x_root, e.y_root))
             chip_widgets.append(chip)
 
+    def _rename_chip(path: str):
+        """Prompt for a friendly alias for `path`, persist it, redraw."""
+        from tkinter import simpledialog
+        current = _project_short_name(path)
+        new_name = simpledialog.askstring(
+            "Rename log",
+            f"Display name for this log:\n\n{path}",
+            initialvalue=current,
+            parent=dlg,
+        )
+        if new_name is None:
+            return  # cancelled
+        new_name = new_name.strip()
+        aliases = settings.setdefault("aliases", {})
+        if not new_name:
+            # Empty input → clear the alias (revert to auto).
+            aliases.pop(path, None)
+        else:
+            aliases[path] = new_name
+        _save_settings_block()
+        _redraw_chips()
+
+    def _reset_alias(path: str):
+        aliases = settings.get("aliases") or {}
+        if path in aliases:
+            del aliases[path]
+            _save_settings_block()
+            _redraw_chips()
+
     def _switch_to_path(path: str):
         path_var.set(path)
         settings["active_path"] = path
@@ -201,6 +333,9 @@ def open_log_sql_dialog(app):
         if path in recents:
             recents.remove(path)
             settings["recent_paths"] = recents
+            chip_counts.pop(path, None)
+            # An alias for a removed path is harmless but stale — purge.
+            (settings.get("aliases") or {}).pop(path, None)
             if settings.get("active_path") == path:
                 settings["active_path"] = recents[0] if recents else ""
                 path_var.set(settings["active_path"])
@@ -438,6 +573,12 @@ def open_log_sql_dialog(app):
     tree_sb.configure(command=tree.yview, bg=t["bg"], troughcolor=t["bg"], bd=0)
     tree.pack(side="left", fill="both", expand=True)
     tree_sb.pack(side="right", fill="y")
+
+    # Hover tooltips on truncated cells — DAO short name, Tables, even
+    # the action-header row's label often run past their column width.
+    # The custom value_fn pulls the full action label from `tags` for
+    # parent rows (the header text is stored in the `dao` column slot).
+    install_treeview_cell_tooltip(tree, app._tooltip)
     body.add(list_pane, minsize=180, height=320)
 
     # Bottom pane — detail notebook (SQL / Params / Result)
@@ -536,12 +677,101 @@ def open_log_sql_dialog(app):
         foreground=sub_color, background=t.get("muted_bg", "#f0f0f0"),
     )
 
-    # SQL / Params tabs are plain.
+    # SQL tab — plain text (raw with ? placeholders, no formatting).
     sql_box    = _make_text_tab("SQL (with ?)")
-    params_box = _make_text_tab("Params")
-    for box in (sql_box, params_box, result_box):
+    sql_box.configure(state="disabled")
+
+    # Params tab — structured table instead of the raw
+    # `[STRING:1:foo][STRING:2:bar]…` blob. Three columns (`#` /
+    # `Type` / `Value`); type-coloured rows; scrollable. The raw blob
+    # is preserved in `state["params_raw"]` so Copy / Send paths can
+    # still produce the original bracket-encoded string if needed.
+    params_frame = tk.Frame(nb, bg=t["bg"])
+    params_sb = tk.Scrollbar(params_frame, orient="vertical")
+    style.configure(
+        "Params.Treeview",
+        background=t["output_bg"], fieldbackground=t["output_bg"],
+        foreground=t["fg"], bordercolor=t["bg"], borderwidth=0,
+        rowheight=22,
+    )
+    style.configure(
+        "Params.Treeview.Heading",
+        background=t["muted_bg"], foreground=t["fg"], relief="flat",
+    )
+    style.map("Params.Treeview",
+              background=[("selected", t["accent"])],
+              foreground=[("selected", t["accent_fg"])])
+    params_tree = ttk.Treeview(
+        params_frame, columns=("idx", "type", "value"),
+        show="headings", style="Params.Treeview",
+        yscrollcommand=params_sb.set,
+    )
+    params_tree.heading("idx",   text="#")
+    params_tree.heading("type",  text="Type")
+    params_tree.heading("value", text="Value")
+    params_tree.column("idx",   width=44,  anchor="e",  stretch=False)
+    params_tree.column("type",  width=92,  anchor="w",  stretch=False)
+    params_tree.column("value", width=480, anchor="w",  stretch=True)
+    params_sb.configure(command=params_tree.yview,
+                        bg=t["bg"], troughcolor=t["bg"], bd=0)
+    params_tree.pack(side="left", fill="both", expand=True)
+    params_sb.pack(side="right", fill="y")
+    # Type-coloured row tags. STRING in green, numerics in purple,
+    # NULL muted. Matches the colour scheme on the Result tab so
+    # `'foo'` reads the same way wherever it appears.
+    if _is_dark():
+        ty_string, ty_num, ty_null, ty_date = (
+            "#ce9178", "#b5cea8", "#6a9955", "#4ec9b0",
+        )
+    else:
+        ty_string, ty_num, ty_null, ty_date = (
+            "#067d17", "#1750eb", "#8c8c8c", "#d36a00",
+        )
+    params_tree.tag_configure("ty_string", foreground=ty_string)
+    params_tree.tag_configure("ty_num",    foreground=ty_num)
+    params_tree.tag_configure("ty_null",   foreground=ty_null)
+    params_tree.tag_configure("ty_date",   foreground=ty_date)
+    # Double-click a row → copy that single value to the clipboard.
+    def _on_param_dblclick(_e):
+        sel = params_tree.selection()
+        if not sel:
+            return
+        val = params_tree.set(sel[0], "value")
+        try:
+            app.clipboard_clear()
+            app.clipboard_append(val)
+            app._toast.show(f"Copied: {val[:30]}", 1100, "success")
+        except Exception:
+            pass
+    params_tree.bind("<Double-Button-1>", _on_param_dblclick)
+    # Cell tooltips so long values that overflow the column are still readable.
+    install_treeview_cell_tooltip(params_tree, app._tooltip)
+    nb.add(params_frame, text="Params")
+
+    for box in (sql_box, result_box):
         box.configure(state="disabled")
     body.add(detail_pane, minsize=180, height=380)
+
+    def _render_params_table(params: list[tuple[str, str]]):
+        """Populate the Params tree from a `(type, value)` list."""
+        params_tree.delete(*params_tree.get_children())
+        for i, (typ, val) in enumerate(params, start=1):
+            t_upper = (typ or "STRING").upper()
+            if t_upper == "NULL":
+                tag = "ty_null"
+            elif t_upper in ("DATE", "TIMESTAMP", "TIME", "DATETIME"):
+                tag = "ty_date"
+            elif t_upper in ("INT", "INTEGER", "LONG", "BIGINT", "SHORT",
+                             "SMALLINT", "TINYINT", "DECIMAL", "NUMERIC",
+                             "NUMBER", "DOUBLE", "FLOAT", "REAL"):
+                tag = "ty_num"
+            else:
+                tag = "ty_string"
+            params_tree.insert(
+                "", "end",
+                values=(str(i), t_upper, val),
+                tags=(tag,),
+            )
 
     # ── Status bar + actions ────────────────────────────────────────────
     status = tk.Frame(dlg, bg=t["bg"])
@@ -575,8 +805,25 @@ def open_log_sql_dialog(app):
     direct_btn.pack(side="left", padx=(0, 6))
 
     _btn(actions, "Close", dlg.destroy).pack(side="right")
-    _btn(actions, "Send to translator input",
-         lambda: _send_to_translator(), accent=True).pack(side="right", padx=(0, 6))
+    send_btn = _btn(actions, "Send to translator input",
+         lambda: _send_to_translator(), accent=True)
+    send_btn.pack(side="right", padx=(0, 6))
+    # Ctrl+click "Send" → new tab. Power-user shortcut on the same button
+    # avoids cluttering the action bar with a second button. The visible
+    # "Send to new tab" button below covers the discoverable path.
+    send_btn.bind("<Control-Button-1>", lambda _e: _send_to_translator(new_tab=True))
+    new_tab_btn = _btn(actions, "Send to new tab",
+        lambda: _send_to_translator(new_tab=True))
+    new_tab_btn.pack(side="right", padx=(0, 6))
+    try:
+        app._attach_tooltip(
+            new_tab_btn,
+            "Open the runnable SQL in a fresh translator tab instead of\n"
+            "replacing the active one. Useful for side-by-side comparison.\n"
+            "Tip: Ctrl+click 'Send to translator input' does the same.",
+        )
+    except Exception:
+        pass
     _btn(actions, "Copy result", lambda: _copy_result()).pack(side="right", padx=(0, 6))
 
     # ── Helpers ─────────────────────────────────────────────────────────
@@ -773,14 +1020,15 @@ def open_log_sql_dialog(app):
         state["selected"] = stmt
         if stmt is None:
             class_lbl.configure(text="Class:  —")
-            for box in (sql_box, params_box, result_box):
+            for box in (sql_box, result_box):
                 _set_text(box, "")
+            _render_params_table([])
             return
         class_lbl.configure(
             text=f"Class:  {stmt.fqcn or '(unknown)'}   ·   id={stmt.id}",
         )
         _set_text(sql_box, stmt.sql)
-        _set_text(params_box, stmt.params_raw)
+        _render_params_table(stmt.params)
         # The Result tab is the main thing — apply the lightweight
         # prettifier so a 933-char SQL renders as something the eye can
         # actually scan instead of one continuous line, then add syntax
@@ -861,6 +1109,11 @@ def open_log_sql_dialog(app):
             noise_tables=settings.get("noise_tables") or DEFAULT_NOISE_TABLES,
         )
         actions = group_by_action(stmts)
+        # Cache the statement count so the chip can show `(N)` and users
+        # can see at a glance which projects have data loaded. Computed
+        # *before* _push_recent so the chip redraw it triggers picks up
+        # the count immediately (avoiding a no-count flash + re-render).
+        chip_counts[path] = sum(len(a.statements) for a in actions)
         state["actions"] = actions
         state["selected"] = None
         _render_tree()
@@ -952,20 +1205,46 @@ def open_log_sql_dialog(app):
         except Exception:
             _notice("Clipboard copy failed", accent=False)
 
-    def _send_to_translator():
+    def _send_to_translator(*, new_tab: bool = False):
         text = _current_result_text()
         if not text.strip():
             _notice("Nothing to send — pick a statement first", accent=False)
             return
         try:
-            app.input_box.configure(state="normal")
-            app.input_box.delete("1.0", "end")
-            app.input_box.insert("1.0", text)
-            app.on_translate()
-            app._toast.show("Sent SQL into translator input", 1300, "success")
-            _notice("Sent into translator input", accent=True)
+            if new_tab:
+                # Open a fresh doc tab so the active one isn't stomped —
+                # useful when comparing the extracted SQL with what's
+                # already in the translator. Title hints at the source so
+                # the user can tell tabs apart at a glance.
+                title = _suggest_send_tab_title()
+                app._new_doc_tab(initial_input=text, title=title)
+                app._toast.show(f"Sent to new tab: {title}", 1500, "success")
+                _notice("Sent to a new tab", accent=True)
+            else:
+                app.input_box.configure(state="normal")
+                app.input_box.delete("1.0", "end")
+                app.input_box.insert("1.0", text)
+                app.on_translate()
+                app._toast.show("Sent SQL into translator input", 1300, "success")
+                _notice("Sent into translator input", accent=True)
         except Exception:
             _notice("Couldn't reach translator input", accent=False)
+
+    def _suggest_send_tab_title() -> str:
+        """Build a short, recognisable tab title from the current
+        selection. Examples: `id=189369c1`, `PdaDataSelectDao#search`,
+        `Direct extract`."""
+        if state["direct"]:
+            return "Direct extract"
+        sel = state.get("selected")
+        if not sel:
+            return "Extracted SQL"
+        parts = []
+        if sel.dao_short:
+            parts.append(sel.dao_short)
+        if sel.id:
+            parts.append(f"id={sel.id}")
+        return " · ".join(parts) if parts else "Extracted SQL"
 
     # ── Direct mode (paste SQL + params, no log file) ─────────────────
     direct_panel = tk.Frame(dlg, bg=t["bg"])
@@ -1094,6 +1373,25 @@ def open_log_sql_dialog(app):
 
     # ── Bindings + lifecycle ───────────────────────────────────────────
     dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+    # Alt+1..9 — switch to the Nth recent log path. The digit is also
+    # printed on each chip label so the hotkey is discoverable.
+    def _switch_by_index(idx: int):
+        recents = settings.get("recent_paths") or []
+        if 0 <= idx < len(recents):
+            _switch_to_path(recents[idx])
+    for n in range(1, 10):
+        # `Alt-KeyPress-N` matches both the digit-row key and numeric
+        # keypad on most platforms.
+        dlg.bind(
+            f"<Alt-KeyPress-{n}>",
+            lambda _e, i=n - 1: _switch_by_index(i),
+        )
+        # Alt + Cmd shadow for Mac users who type Option as Alt.
+        dlg.bind(
+            f"<Mod1-KeyPress-{n}>",
+            lambda _e, i=n - 1: _switch_by_index(i),
+        )
 
     def _on_destroy(_e=None):
         if getattr(app, "_log_sql_dialog", None) is dlg:

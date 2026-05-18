@@ -2,13 +2,14 @@ import tkinter as tk
 from tkinter import scrolledtext
 
 from ...themes import THEMES
+from .placement import place_dialog
 
 
 def show_help_dialog(app):
     t = THEMES[app._theme]
     dlg = tk.Toplevel(app)
     dlg.title("Keyboard Shortcuts & Features")
-    dlg.geometry("640x520")
+    place_dialog(dlg, app, 640, 520, min_width=520, min_height=420)
     dlg.configure(bg=t["bg"])
     dlg.transient(app); dlg.grab_set()
 
@@ -86,6 +87,17 @@ def show_help_dialog(app):
         "  Ctrl+Shift+Tab       Previous tab\n"
         "  Double-click title   Rename tab inline (Esc cancels)\n"
         "  Right-click tab      Rename / Duplicate / Close / Close Others\n"
+        "\n"
+        "──  MOUSE  ──\n"
+        "  Right-click in input   ✕ Clear  ·  📋 Save as snippet  ·\n"
+        "                        📂 Open file  ·  🛠 Extract SQL from log\n"
+        "  Right-click selected   Copy  ·  Add / remove exclusion  ·\n"
+        "    text (input/output)  Add column → User Map (quick rename)\n"
+        "  Right-click in output  Copy all  ·  💾 Save…  ·  Find  ·\n"
+        "                        🔍 Inspect SQL  (Design Doc mode)\n"
+        "  Drag file onto window  Load file into input (requires tkinterdnd2)\n"
+        "  Double-click tab title Rename tab inline (Esc cancels)\n"
+        "  Right-click tab title  Rename / Duplicate / Close / Close Others\n"
         "\n"
         "──  MISC  ──\n"
         "  F1                   Show this help\n"

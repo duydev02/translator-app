@@ -1,13 +1,14 @@
 import tkinter as tk
 
 from ...themes import THEMES
+from .placement import place_dialog
 
 
 def open_filter_dialog(app):
     t = THEMES[app._theme]
     dlg = tk.Toplevel(app)
     dlg.title("Translation Filter")
-    dlg.geometry("680x560")
+    place_dialog(dlg, app, 680, 560, min_width=520, min_height=420)
     dlg.minsize(520, 420)
     dlg.configure(bg=t["bg"])
     dlg.transient(app); dlg.grab_set()
@@ -183,6 +184,39 @@ def open_filter_dialog(app):
     footer = tk.Frame(dlg, bg=t["bg"])
     footer.pack(fill="x", padx=14, pady=(8, 12))
 
+    # Snapshot the *active* filter so we can compare while the user
+    # edits. If they tick things then close without Apply, this signals
+    # "you have unapplied changes" — instead of the previous silent
+    # mismatch where the translated output didn't reflect the dialog.
+    _active_snapshot = {
+        "schemas": frozenset(app._filter_schemas or ()),
+        "tables":  frozenset(app._filter_tables  or ()),
+    }
+    dirty_lbl = tk.Label(
+        footer, text="", font=app._small,
+        bg=t["bg"], fg=t["accent"], anchor="e",
+    )
+    dirty_lbl.pack(side="right", padx=(6, 10))
+
+    def _current_selection():
+        return (
+            frozenset(s for s, v in schema_vars.items() if v.get()),
+            frozenset(t_ for t_, v in table_vars.items() if v.get()),
+        )
+
+    def _refresh_dirty(*_):
+        cur_s, cur_t = _current_selection()
+        is_dirty = (
+            cur_s != _active_snapshot["schemas"]
+            or cur_t != _active_snapshot["tables"]
+        )
+        dirty_lbl.configure(text="● Unapplied changes" if is_dirty else "")
+
+    # Tick every Boolean we own so the dirty label tracks live edits.
+    for v in list(schema_vars.values()) + list(table_vars.values()):
+        v.trace_add("write", _refresh_dirty)
+    _refresh_dirty()
+
     def _clear_all():
         for v in schema_vars.values(): v.set(False)
         for v in table_vars.values():  v.set(False)
@@ -215,6 +249,23 @@ def open_filter_dialog(app):
         t_msg = f"{len(sel_tables)}/{total_t} tables"   if sel_tables  else f"all {total_t} tables"
         app._toast.show(f"Filter: {s_msg} · {t_msg}", 1500, "success")
 
+    def _cancel():
+        cur_s, cur_t = _current_selection()
+        is_dirty = (
+            cur_s != _active_snapshot["schemas"]
+            or cur_t != _active_snapshot["tables"]
+        )
+        if is_dirty:
+            from tkinter import messagebox
+            keep = messagebox.askyesno(
+                "Discard changes?",
+                "You have unapplied filter changes.\n\nDiscard and close?",
+                parent=dlg,
+            )
+            if not keep:
+                return
+        dlg.destroy()
+
     tk.Button(footer, text="Apply", font=app._btn, relief="flat", bd=0,
         bg=t["accent"], fg=t["accent_fg"], padx=18, pady=6, cursor="hand2",
         activebackground=t["accent"], activeforeground=t["accent_fg"],
@@ -222,7 +273,8 @@ def open_filter_dialog(app):
     tk.Button(footer, text="Cancel", font=app._btn, relief="flat", bd=0,
         bg=t["muted_bg"], fg=t["muted_fg"], padx=14, pady=6, cursor="hand2",
         activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
-        command=dlg.destroy).pack(side="right", padx=(0, 6))
+        command=_cancel).pack(side="right", padx=(0, 6))
+    dlg.protocol("WM_DELETE_WINDOW", _cancel)
     tk.Button(footer, text="Clear all", font=app._btn, relief="flat", bd=0,
         bg=t["muted_bg"], fg=t["muted_fg"], padx=12, pady=6, cursor="hand2",
         activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
