@@ -163,6 +163,111 @@ _FAKE_LOG = """\
 """
 
 
+# ── Nested-DAO attribution ────────────────────────────────────────────────────
+# Real `stclibApp.log` files have nested DAO scopes — a business DAO opens,
+# internally calls one or more SystemPropertieDao for config, then runs its
+# real query. The previous flat `last_fqcn` tracking attributed the
+# business query to whichever DAO was last *mentioned* (SystemPropertieDao,
+# which had just closed). The fix is a stack: open = push, close = pop.
+# Note: prepared-statement ids in the real logs are hex
+# (`262f0e15`, `3b852eed`, …) — the parser's regex enforces
+# `[0-9A-Fa-f]{4,}`. Stick to hex chars here too.
+_NESTED_LOG = """\
+2026-04-29 11:07:42,INFO,commons.dao.AbstractDaoInvoker,InvokeDao           ,Daoの開始jp.co.x.mdware.dailyorder.dao.web.impl.DailyOrderRetrieveDao threadName=t1
+2026-04-29 11:07:42,INFO,commons.dao.AbstractDaoInvoker,InvokeDao           ,Daoの開始jp.co.x.swc.commons.resorces.SystemPropertieDao threadName=t1
+2026-04-29 11:07:42,DEBUG,commons.dao.PreparedStatementEx,<init>              ,CreatePreparedStatement id=c0ff0001   sql=SELECT * FROM SYSTEM_CONTROL WHERE A = ?
+2026-04-29 11:07:42,INFO,commons.dao.PreparedStatementEx,executeQuery        ,PreparedStatement.executeQuery() id=c0ff0001  params=[STRING:1:ONLINE_DT]
+2026-04-29 11:07:42,INFO,commons.dao.AbstractDaoInvoker,InvokeDao           ,Daoの終了jp.co.x.swc.commons.resorces.SystemPropertieDao
+2026-04-29 11:07:42,DEBUG,commons.dao.PreparedStatementEx,<init>              ,CreatePreparedStatement id=b1289999   sql=SELECT A, B, C FROM DT_DAILY_HACHU_HEADER WHERE TENPO_CD = ? AND BUNRUI1_CD = ?
+2026-04-29 11:07:42,INFO,commons.dao.PreparedStatementEx,executeQuery        ,PreparedStatement.executeQuery() id=b1289999  params=[STRING:1:0018][STRING:2:001901]
+2026-04-29 11:07:42,INFO,commons.dao.AbstractDaoInvoker,InvokeDao           ,Daoの終了jp.co.x.mdware.dailyorder.dao.web.impl.DailyOrderRetrieveDao
+"""
+
+
+def test_nested_dao_attributes_to_outer_scope():
+    """The second SELECT runs AFTER SystemPropertieDao closed but
+    BEFORE DailyOrderRetrieveDao closes — i.e. inside the outer
+    scope. It must be attributed to DailyOrderRetrieveDao, NOT to
+    SystemPropertieDao (which was the previous misattribution)."""
+    stmts = parse_log(_NESTED_LOG)
+    biz = next(s for s in stmts if s.id == "b1289999")
+    assert biz.fqcn == "jp.co.x.mdware.dailyorder.dao.web.impl.DailyOrderRetrieveDao"
+
+
+def test_nested_inner_query_keeps_inner_dao():
+    """The inner config query runs while SystemPropertieDao is the
+    open inner scope — it should get SystemPropertieDao."""
+    stmts = parse_log(_NESTED_LOG)
+    cfg = next(s for s in stmts if s.id == "c0ff0001")
+    assert cfg.fqcn == "jp.co.x.swc.commons.resorces.SystemPropertieDao"
+
+
+def test_nested_dao_scoring_lands_business_query_as_primary():
+    """The business query (id=b1289999) is short here, so won't cross
+    the threshold by length. But after the FQCN fix it gets the
+    domain (mdware.dailyorder) baseline bonus instead of the
+    swc.commons noise penalty — net positive score."""
+    stmts = parse_log(_NESTED_LOG)
+    annotate_scores(stmts)
+    biz = next(s for s in stmts if s.id == "b1289999")
+    # Pre-fix: this was attributed to SystemPropertieDao (noise) and
+    # scored deeply negative. Post-fix: domain DAO, positive score.
+    assert biz.score > 0, f"expected positive, got {biz.score}"
+
+
+def test_fqcn_regex_rejects_mojibake_prefix():
+    """When the encoding chain falls to latin-1, the Japanese tokens
+    become high-Latin-1 chars that Unicode `\\w` would happily glue to
+    the real FQCN. The ASCII-only regex must break at those bytes and
+    extract only the real Java dotted identifier."""
+    # `Daoの開始` decoded as latin-1 from cp932 bytes — represents the
+    # exact mojibake pattern we observed in real logs.
+    mojibake_line = (
+        "InvokeDao Dao\xe3\x81\xae\xe9\x96\x8b\xe5\xa7\x8b"
+        "jp.co.x.mdware.dailyorder.dao.web.impl.DailyOrderRetrieveDao threadName=t"
+    )
+    from translator_app.logsql import _extract_fqcn
+    fqcn = _extract_fqcn(mojibake_line)
+    # The cleanly-extracted FQCN must NOT include the mojibake prefix.
+    assert fqcn == "jp.co.x.mdware.dailyorder.dao.web.impl.DailyOrderRetrieveDao"
+
+
+# ── Scoring tiers for very-large SQL ──────────────────────────────────────────
+def test_score_statement_large_sql_tiers():
+    """A multi-thousand-char SQL gets cumulative length bonuses so it
+    stays primary even under adverse conditions (wrong DAO, noisy
+    target table). The user's real example (id=262f0e15) is 11K chars
+    with 56 binds — those should land it well above the threshold."""
+    # ~12K of repeated identifiers to clear the >10000-char tier.
+    # Each "COLUMN_XXX, " is ~12 chars; need ~850 to exceed 10K.
+    big_sql = ("SELECT " + ", ".join(f"COLUMN_{i:04d}" for i in range(900))
+               + " FROM T WHERE A = ?")
+    assert len(big_sql) > 10000
+    s = Statement(
+        id="big",
+        sql=big_sql,
+        fqcn="jp.co.x.mdware.dailyorder.dao.web.impl.DailyOrderRetrieveDao",
+        params=[("STRING", "x")],
+    )
+    score = score_statement(s)
+    # Length tiers alone: +20 (>500) +10 (>1500) +15 (>5000) +15 (>10000)
+    # = +60. Plus +10 baseline for non-noise DAO. Well above 30.
+    assert score >= 60
+
+
+def test_score_statement_param_cap_raised_to_ten():
+    """The param-count bonus was previously capped at 6 (+18). Real
+    business queries with multiple UNION-ALL branches legitimately
+    have 20+ binds — the new cap is 10 (+30)."""
+    s_few = Statement(id="a", sql="SELECT 1 FROM T", fqcn="x.y.z.Dao",
+                       params=[("STRING", str(i)) for i in range(6)])
+    s_many = Statement(id="b", sql="SELECT 1 FROM T", fqcn="x.y.z.Dao",
+                       params=[("STRING", str(i)) for i in range(20)])
+    # 6 params → +18 from params; 20 params → +30 (capped at 10).
+    # The delta is exactly +12.
+    assert score_statement(s_many) - score_statement(s_few) == 12
+
+
 def test_find_entry_by_id_returns_full_record():
     e = find_entry_by_id(_FAKE_LOG, "abcd1234")
     assert e is not None

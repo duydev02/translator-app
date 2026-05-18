@@ -5,6 +5,36 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
+- **Extract SQL: log-switcher chips polish** — the chip strip at the
+  top of the Extract SQL dialog (used to switch between recent log
+  files / sub-projects) got six targeted improvements:
+  - **Smart short labels.** Instead of `.../mdw-lawdailyorder-web/log`
+    (30 chars of mostly-identical noise) the chip now reads
+    `lawdailyorder` (13 chars of pure signal). Strips
+    `mdw-` / `mdw_` / `mkm-` / `mkm_` prefixes and `-web` / `_web` /
+    `-app` / `_app` / `-service` / `_service` suffixes; walks past
+    boilerplate directories (`log`, `logs`, `tmp`, `out`).
+  - **Active chip marker** — the currently-loaded log gets a `▸`
+    prefix on top of the existing accent color, so it's unambiguous
+    even on a high-contrast monitor.
+  - **Missing-file indicator** — chips for paths that no longer
+    exist on disk show a `⚠` prefix in danger-red. Tooltip explains.
+  - **Statement-count badge.** After parsing a log, the chip displays
+    `(N)` so you can see at a glance which projects have data loaded
+    and how busy each one is — e.g. `▸ 1 lawdailyorder  (47)`.
+  - **`Alt+1..9` keyboard hotkeys.** The number in the chip label
+    is the hotkey: `Alt+1` switches to the first chip, `Alt+2` to
+    the second, etc. Discoverable + fast for power users.
+  - **Right-click → Rename…** to give a path a custom display name
+    (e.g. "DailyOrder PROD" vs "DailyOrder DEV"). Persisted per-path
+    in `translator_settings.json` under `log_sql.aliases`. Right-click
+    → *Reset to auto-name* drops the alias.
+  - Vertical padding fixes so the chip row breathes; tooltip now
+    shows full path + hotkey + load status + missing-file warning.
+- **Extract SQL: structured Params tab** — selected statements now show
+  bound parameters in a sortable-looking three-column table (`#`, `Type`,
+  `Value`) instead of only the raw bracket blob. Rows are type-coloured
+  and double-clicking a param value copies it to the clipboard.
 - **Filter dialog: dirty indicator + discard-changes guard** — while
   editing the Filter dialog, a small "● Unapplied changes" label appears
   in the footer the moment your selection differs from what's currently
@@ -51,6 +81,46 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   so User Map overrides are picked up immediately.
 
 ### Fixed
+- **Extract SQL: nested DAO scopes now attribute correctly** — a real
+  log pattern where `DailyOrderRetrieveDao` opens, internally calls
+  `SystemPropertieDao` for config (which opens + closes a few times),
+  then runs its big business query while still in the outer scope was
+  attributing that business query to the *inner* `SystemPropertieDao`
+  — pushing the query into the noise-package penalty and hiding it
+  behind "Hide infrastructure". The parser now maintains a DAO scope
+  **stack**: `Daoの開始` pushes, `Daoの終了` pops; statements are
+  attributed to the genuinely-still-open scope (`dao_stack[-1]`).
+  Where the Japanese tokens are lost to mojibake the parser falls
+  back to "FQCN-matches-stack-top = close, else open", which gives
+  the same answer in practice. The user's reproducer (id=262f0e15
+  on a `mdw-lawdailyorder-web` log) goes from **score −7 →
+  score 125** with FQCN flipping from `SystemPropertieDao` to the
+  correct `DailyOrderRetrieveDao`.
+- **Extract SQL: FQCN regex is now ASCII-only** — when the encoding
+  chain couldn't decode the log cleanly, the Japanese tokens before
+  the FQCN became high-Latin-1 mojibake characters that `\w` (Unicode-
+  aware in Py3) happily glued onto the real Java identifier — so
+  `Daoの開始jp.co.…DailyOrderRetrieveDao` was extracted as one
+  ~50-char "identifier" with mojibake prefix. `_FQCN_RE` now uses
+  `re.ASCII`, so the regex breaks cleanly at the first non-ASCII byte
+  and emits a clean Java FQCN even when the surrounding text is
+  garbled.
+- **Extract SQL: smarter encoding chain** — `read_log_file` previously
+  fell straight to `latin-1` when both `utf-8` and `cp932` strict
+  decode failed (one stray byte in a CP932 file is enough to break
+  strict mode), turning every Japanese line into mojibake. The chain
+  now tries `utf-8 → utf-8-sig → cp932 → shift_jis` strictly, then
+  `cp932` and `shift_jis` with `errors="replace"` *before* the
+  latin-1 last-ditch — so 99 % of the Japanese still decodes
+  correctly and only the rare bad byte becomes `?`.
+- **Extract SQL: scoring tiers for very large SQL + higher params
+  cap** — added `+15` at `>5000` and `+15` at `>10000` chars, and
+  raised the params cap from `min(n, 6)` to `min(n, 10)` (i.e. a
+  56-bind business query now earns the full +30 from params, not
+  capped at +18). Combined effect: a genuine business query with
+  joined/unioned tables and many binds scores well above the primary
+  threshold even when something else goes wrong (e.g. attribution to
+  an unexpected package).
 - **`pretty_sql()` no longer splits `BETWEEN x AND y`** — the `AND`
   there is syntactic, not a logical connective. The new formatter
   back-scans for the nearest barrier keyword (BETWEEN / AND / OR /

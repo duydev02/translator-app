@@ -79,7 +79,14 @@ _PARAM_SEG_RE = re.compile(
 # message is mojibake-encoded depending on the locale; we find the first
 # `jp.co.…` substring and treat that as the class. Defensive — many logs
 # use other vendor prefixes; we just grab the longest dotted identifier.
-_FQCN_RE = re.compile(r"\b((?:[a-zA-Z_]\w*\.){2,}[A-Za-z_]\w*)\b")
+# NOTE: `re.ASCII` is essential here. Without it, `\w` matches any
+# Unicode word character — which means a line like
+# `Dao開始jp.co.vinculumjapan...` decoded with the wrong codec (so the
+# Japanese arrives as mojibake characters that Python still considers
+# "word characters") gets matched as ONE big identifier including the
+# mojibake prefix glued to the real FQCN. Forcing ASCII-only word
+# chars makes the regex break cleanly at the first non-ASCII byte.
+_FQCN_RE = re.compile(r"\b((?:[a-zA-Z_]\w*\.){2,}[A-Za-z_]\w*)\b", re.ASCII)
 
 # Recognise a SQL string literal (single quotes, with `''` as escape) so we
 # don't substitute placeholders found inside one.
@@ -99,6 +106,30 @@ _CALL_METHOD_RE = re.compile(
 # transaction markers when there's no callMethod (e.g. background jobs).
 _INIT_SESSION_RE = re.compile(r"ServletDaoInvoker\s*,\s*initSession")
 _END_SESSION_RE  = re.compile(r"ServletDaoInvoker\s*,\s*endSession")
+
+# `InvokeDao` lines come in pairs: open ("Daoの開始…FQCN") + close
+# ("Daoの終了…FQCN"). When the log is decoded cleanly we can read the
+# Japanese tokens directly; when it's mojibake we fall back to a
+# stack-matching heuristic in `parse_log`. We also accept the English
+# variants in case a different log writer is in play.
+_DAO_OPEN_TOKENS  = ("Daoの開始", "Dao開始", "Dao Open", "DaoOpen")
+_DAO_CLOSE_TOKENS = ("Daoの終了", "Dao終了", "Daoの終わり", "Dao End", "DaoEnd")
+
+
+def _dao_action(line: str) -> str | None:
+    """Classify an `InvokeDao` line as `"open"`, `"close"`, or `None`
+    (unknown — caller falls back to the stack-matching heuristic).
+
+    The clean-Japanese keyword wins when present; if the log was decoded
+    with the wrong encoding (Japanese chars come out as mojibake) we
+    return None and let `parse_log` use FQCN-vs-stack-top to decide."""
+    for tok in _DAO_OPEN_TOKENS:
+        if tok in line:
+            return "open"
+    for tok in _DAO_CLOSE_TOKENS:
+        if tok in line:
+            return "close"
+    return None
 
 # Pull SELECT/INSERT/UPDATE/DELETE/MERGE/WITH off the front of a SQL.
 _STMT_TYPE_RE = re.compile(
@@ -697,12 +728,20 @@ def score_statement(
         # like `TenpoSelectDao` sit just below the primary threshold.
         score += 10
 
-    # SQL complexity.
+    # SQL complexity. Length is the strongest signal: the user's
+    # heuristic is "long SQL = real business query, short SQL = config
+    # lookup / log write / status check". Tiers below 500 and above 5K
+    # are observable in real logs (config queries are sub-300 chars;
+    # business queries with UNIONs and many JOINs run 5–15K).
     n = len(sql)
     if n > 500:
         score += 20
     if n > 1500:
         score += 10
+    if n > 5000:
+        score += 15
+    if n > 10000:
+        score += 15
     if n < 200:
         score -= 10
 
@@ -716,9 +755,13 @@ def score_statement(
         score += 10
 
     # Param count — more params means more user input being threaded
-    # through. Capped so a 50-bind logging insert doesn't dominate.
+    # through. Capped so a 50-bind logging insert doesn't dominate, but
+    # raised from the previous cap of 6 because real business queries
+    # with 5–6 WHERE/JOIN conditions × multiple UNION ALL branches
+    # legitimately rack up 20–60 bound params (see id=262f0e15 with
+    # 56 binds across 7 UNION-ALL'd SELECTs).
     n_params = len(stmt.params)
-    score += min(n_params, 6) * 3   # capped at +18
+    score += min(n_params, 10) * 3   # capped at +30
 
     # Target-table noise.
     for tbl in stmt.target_tables:
@@ -749,12 +792,19 @@ def parse_log(log_text: str) -> list[Statement]:
         return []
     by_id: dict[str, Statement] = {}
     order: list[str] = []
-    last_fqcn: str | None = None
+    # DAO scopes nest: when DailyOrderRetrieveDao calls SystemPropertieDao
+    # mid-flight, both DAOs are "open" at the same time. The previous
+    # `last_fqcn` approach attributed every nested statement to whichever
+    # FQCN was last *mentioned* — so the big DailyOrderRetrieveDao query
+    # would inherit SystemPropertieDao because SystemPropertieDao had just
+    # opened+closed before it. The stack tracks the genuinely-open DAOs;
+    # `dao_stack[-1]` is the right FQCN for a statement at any moment.
+    dao_stack: list[str] = []
     last_action: str | None = None
     last_session_ts: str | None = None
     # Recorded as we go so we can fill in missing FQCNs in a second pass —
     # some logs (e.g. files that start mid-session) have an init line BEFORE
-    # the first InvokeDao, so the running last_fqcn is still None.
+    # the first InvokeDao, so the running stack is still empty at that point.
     invoke_records: list[tuple[int, str]] = []  # (lineno, fqcn)
 
     for lineno, line in enumerate(log_text.splitlines(), start=1):
@@ -763,7 +813,28 @@ def parse_log(log_text: str) -> list[Statement]:
         if "InvokeDao" in line:
             f = _extract_fqcn(line)
             if f:
-                last_fqcn = f
+                action = _dao_action(line)
+                if action is None:
+                    # Mojibake fallback: same FQCN as stack top = close,
+                    # otherwise treat as open. Robust to lost Japanese
+                    # tokens.
+                    if dao_stack and dao_stack[-1] == f:
+                        dao_stack.pop()
+                    else:
+                        dao_stack.append(f)
+                elif action == "open":
+                    dao_stack.append(f)
+                else:  # close
+                    # Pop the matching FQCN. Prefer popping the topmost
+                    # match; if none, pop the top defensively so the
+                    # stack stays bounded.
+                    for i in range(len(dao_stack) - 1, -1, -1):
+                        if dao_stack[i] == f:
+                            dao_stack.pop(i)
+                            break
+                    else:
+                        if dao_stack:
+                            dao_stack.pop()
                 invoke_records.append((lineno, f))
             continue
         cm = _CALL_METHOD_RE.search(line)
@@ -780,6 +851,10 @@ def parse_log(log_text: str) -> list[Statement]:
             # session boundaries) — see group_by_action for the truth.
             continue
 
+        # The "current" DAO for any statement is whichever DAO is at the
+        # top of the open-scope stack right now.
+        current_fqcn = dao_stack[-1] if dao_stack else None
+
         # Init line: SQL with `?` placeholders.
         m = _INIT_LINE_RE.search(line)
         if m:
@@ -791,7 +866,7 @@ def parse_log(log_text: str) -> list[Statement]:
                 by_id[qid] = stmt
                 order.append(qid)
             stmt.sql = sql
-            stmt.fqcn = stmt.fqcn or last_fqcn
+            stmt.fqcn = stmt.fqcn or current_fqcn
             stmt.action = stmt.action or last_action
             stmt.timestamp = stmt.timestamp or _extract_timestamp(line) or last_session_ts or ""
             stmt.init_line = lineno
@@ -811,7 +886,7 @@ def parse_log(log_text: str) -> list[Statement]:
             stmt.params = parse_params(stmt.params_raw)
             stmt.exec_line = lineno
             stmt.op = "executeUpdate" if "execteUpdate" in line or "executeUpdate" in line else "executeQuery"
-            stmt.fqcn = stmt.fqcn or last_fqcn
+            stmt.fqcn = stmt.fqcn or current_fqcn
             stmt.action = stmt.action or last_action
             if not stmt.timestamp:
                 stmt.timestamp = _extract_timestamp(line) or ""
@@ -987,16 +1062,33 @@ def read_log_file(path: str, encoding: str = "utf-8") -> str:
     """Read a log file with a forgiving encoding chain. Returns "" on
     error so callers can show a soft 'no SQL found' instead of crashing.
 
-    The order tries: utf-8 → utf-8-sig → cp932 (Windows-Japanese, common
-    for these logs) → latin-1 (always succeeds, possibly mojibake)."""
-    chain = [encoding, "utf-8-sig", "cp932", "latin-1"]
-    for enc in chain:
+    Strategy:
+      1. Try the requested encoding strictly (default `utf-8`).
+      2. Try utf-8-sig strictly (catches BOM-prefixed utf-8 files).
+      3. Try cp932 strictly (Windows-Japanese — common for these logs).
+      4. Try shift_jis strictly.
+      5. Fall back to cp932 with `errors="replace"` — when the log has
+         occasional bad bytes that break strict mode, this still reads
+         99 % of the Japanese correctly (only the bad bytes turn into
+         `?`s, which is far better than the previous latin-1 fallback
+         that produced wholesale mojibake like `Dao�̊J�n`).
+      6. Final fallback: latin-1 with replace (anything is readable)."""
+    strict_chain = [encoding, "utf-8-sig", "cp932", "shift_jis"]
+    for enc in strict_chain:
         try:
             with open(path, "r", encoding=enc, errors="strict") as f:
                 return f.read()
         except (OSError, UnicodeDecodeError):
             continue
-    # Last-ditch — read bytes and replace.
+    # Lenient JP fallback — preserves real Japanese chars and only
+    # replaces individual bad bytes.
+    for enc in ("cp932", "shift_jis"):
+        try:
+            with open(path, "r", encoding=enc, errors="replace") as f:
+                return f.read()
+        except OSError:
+            continue
+    # Last-ditch — read bytes and replace as latin-1 (always succeeds).
     try:
         with open(path, "rb") as f:
             return f.read().decode("latin-1", errors="replace")
