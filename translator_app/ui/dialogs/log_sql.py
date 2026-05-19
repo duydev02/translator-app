@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import os
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from ...config import save_settings
 from ...logsql import (
@@ -44,6 +44,7 @@ from ...logsql import (
     combine_sql_params,
     combine_sql_params_marked,
     count_placeholders,
+    clear_log_file,
     extract_subst_ranges,
     group_by_action,
     parse_log,
@@ -359,6 +360,43 @@ def open_log_sql_dialog(app):
         if chosen:
             _switch_to_path(chosen)
 
+    def _clear_active_log():
+        path = path_var.get().strip()
+        if not path:
+            _notice("Pick a log file to clear", accent=False)
+            return
+        if not os.path.exists(path):
+            _notice(f"File not found: {path}", accent=False)
+            return
+        ok = messagebox.askyesno(
+            "Clear log file",
+            "Clear all content from this log file?\n\n"
+            f"{path}\n\n"
+            "This cannot be undone.",
+            parent=dlg,
+        )
+        if not ok:
+            return
+        try:
+            clear_log_file(path)
+        except OSError as exc:
+            _notice(f"Clear failed: {exc}", accent=False)
+            return
+
+        chip_counts[path] = 0
+        state["actions"] = []
+        state["by_iid"] = {}
+        state["selected"] = None
+        _render_tree()
+        _load_statement(None)
+        _capture_mtime()
+        _redraw_chips()
+        _notice("Cleared log file")
+        try:
+            app._toast.show("Log file cleared", 1200, "success")
+        except Exception:
+            pass
+
     # Right-side action buttons
     tk.Button(
         actions_right, text="+ Add log", font=app._small, relief="flat", bd=0,
@@ -380,6 +418,24 @@ def open_log_sql_dialog(app):
             "Force re-parse the active log right now.\n"
             "Auto-reload will also pick up file changes within ~1.5s "
             "while this dialog is open.",
+        )
+    except Exception:
+        pass
+
+    clear_btn = tk.Button(
+        actions_right, text="Clear log", font=app._small, relief="flat", bd=0,
+        bg=t["muted_bg"], fg=t.get("danger", "#c14a4a"), padx=10, pady=3,
+        cursor="hand2",
+        activebackground=t["muted_bg"],
+        activeforeground=t.get("danger", "#c14a4a"),
+        command=_clear_active_log,
+    )
+    clear_btn.pack(side="left", padx=(0, 4))
+    try:
+        app._attach_tooltip(
+            clear_btn,
+            "Truncate the active log file after confirmation.\n"
+            "Useful before reproducing one action.",
         )
     except Exception:
         pass
