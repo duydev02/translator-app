@@ -1291,7 +1291,10 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
                 app.input_box.configure(state="normal")
                 app.input_box.delete("1.0", "end")
                 app.input_box.insert("1.0", text)
-                app.on_translate()
+                if embedded:
+                    app._set_mode("inline")
+                else:
+                    app.on_translate()
                 app._toast.show("Sent SQL into translator input", 1300, "success")
                 _notice("Sent into translator input", accent=True)
         except Exception:

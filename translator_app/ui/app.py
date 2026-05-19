@@ -1423,7 +1423,7 @@ class TranslatorApp(_BaseTk):
         self._doctabs.append({
             "title":        tab_title,
             "input":        initial_input or "",
-            "mode":         self._mode.get(),
+            "mode":         self._mode.get() if self._mode.get() in ("inline", "designdoc") else "inline",
             "direction":    self._direction.get(),
             "manual_title": bool(title),
         })
@@ -1612,6 +1612,20 @@ class TranslatorApp(_BaseTk):
         style(self._tab_logsql,    mode == "logsql")
         style(self._tab_forward, self._direction.get() == "forward")
         style(self._tab_reverse, self._direction.get() == "reverse")
+        try:
+            if mode == "logsql":
+                self._tab_sep.pack_forget()
+                self._tab_forward.pack_forget()
+                self._tab_reverse.pack_forget()
+            else:
+                if not self._tab_sep.winfo_ismapped():
+                    self._tab_sep.pack(side="left", padx=10, after=self._tab_logsql)
+                if not self._tab_forward.winfo_ismapped():
+                    self._tab_forward.pack(side="left", after=self._tab_sep)
+                if not self._tab_reverse.winfo_ismapped():
+                    self._tab_reverse.pack(side="left", padx=(2, 0), after=self._tab_forward)
+        except AttributeError:
+            pass
         try:
             if mode == "logsql":
                 self._doctabs_bar.pack_forget()
