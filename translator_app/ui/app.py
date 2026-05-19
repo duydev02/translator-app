@@ -120,7 +120,7 @@ def _safe_doc_tabs(value, fallback_mode, fallback_direction):
             if not isinstance(d, dict):
                 continue
             tab_mode = _safe_str_choice(d.get("mode") or fallback_mode, {"inline", "designdoc"}, fallback_mode)
-            if tab_mode == "table":
+            if tab_mode in ("table", "logsql"):
                 tab_mode = "inline"
             tabs.append({
                 "title": d.get("title") if isinstance(d.get("title"), str) else "",
@@ -137,7 +137,7 @@ def _safe_doc_tabs(value, fallback_mode, fallback_direction):
         tabs.append({
             "title": "Tab 1",
             "input": "",
-            "mode": fallback_mode,
+            "mode": fallback_mode if fallback_mode in ("inline", "designdoc") else "inline",
             "direction": fallback_direction,
             "manual_title": False,
         })
@@ -150,7 +150,7 @@ def _sanitize_settings(settings):
         settings = {}
     clean = dict(settings)
     clean["theme"] = _safe_str_choice(clean.get("theme"), set(THEMES), "light")
-    clean["mode"] = _safe_str_choice(clean.get("mode"), {"inline", "designdoc", "table"}, "inline")
+    clean["mode"] = _safe_str_choice(clean.get("mode"), {"inline", "designdoc", "logsql", "table"}, "inline")
     if clean["mode"] == "table":
         clean["mode"] = "inline"
     clean["direction"] = _safe_str_choice(clean.get("direction"), {"forward", "reverse"}, "forward")
@@ -328,6 +328,8 @@ class TranslatorApp(_BaseTk):
         # has entered the event loop, otherwise an expensive restored input can
         # leave Windows showing an unfinished white window as "Not responding".
         self._load_doc(self._active_doc, translate=False)
+        if self._settings.get("mode") == "logsql":
+            self._set_mode("logsql")
         self.after(80, self._initial_translate)
         _startup_log("startup: active doc loaded")
 
@@ -411,6 +413,8 @@ class TranslatorApp(_BaseTk):
             _app_log("Startup shell cleanup failed", sys.exc_info())
 
     def _initial_focus(self):
+        if self._mode.get() == "logsql":
+            return
         try:
             self.input_box.focus_set()
         except Exception:
@@ -540,6 +544,11 @@ class TranslatorApp(_BaseTk):
             command=lambda: self._set_mode("designdoc"))
         self._tab_designdoc.pack(side="left", padx=(2, 0))
 
+        self._tab_logsql = tk.Button(tab_frame, text="Extract SQL",
+            font=self._ui_b, relief="flat", padx=14, pady=4, cursor="hand2", bd=0,
+            command=lambda: self._set_mode("logsql"))
+        self._tab_logsql.pack(side="left", padx=(2, 0))
+
         self._tab_sep = tk.Label(tab_frame, text="│", font=self._ui_b)
         self._tab_sep.pack(side="left", padx=10)
 
@@ -629,17 +638,6 @@ class TranslatorApp(_BaseTk):
         self._settings_menu.add_command(label="Reset window geometry", command=self.reset_window_geometry)
         self._settings_menu.add_command(label="Clear saved tabs", command=self.clear_saved_tabs)
         self._settings_btn.pack(side="right", pady=8)
-
-        # ── 🛠 Extract SQL — direct button on the topbar ────────────────
-        # The log-extractor is the main developer utility and gets opened
-        # constantly during debugging, so it earns a dedicated single-click
-        # button instead of living behind a Tools menu. If more
-        # developer tools land later, convert this back into a menubutton
-        # with submenu entries (see git history for the previous shape).
-        self._tools_btn = tk.Button(self._topbar, text="🛠  Extract SQL",
-            font=self._ui_b, relief="flat", padx=12, pady=4, cursor="hand2", bd=0,
-            command=self.open_log_sql_dialog)
-        self._tools_btn.pack(side="right", padx=(0, 6), pady=8)
 
         # ── Doc-tab bar (multi-input) ────────────────────────────────────────
         self._doctabs_bar = tk.Frame(self, height=30)
@@ -863,6 +861,9 @@ class TranslatorApp(_BaseTk):
             command=self.output_box.xview,
         )
 
+        self._logsql_host = tk.Frame(self)
+        self._logsql_view = None
+
         # ── Status bar ──
         self._statusbar = tk.Frame(self, height=26)
         self._statusbar.pack(fill="x", side="bottom")
@@ -880,7 +881,7 @@ class TranslatorApp(_BaseTk):
         self._frames = [self._topbar, self._actionbar, self._statusbar, in_header,
                         out_header, top_pane, bot_pane, self._search_frame,
                         self._tab_frame, self._doctabs_bar, self._doctabs_inner,
-                        self._stats_bar, self]
+                        self._stats_bar, self._logsql_host, self]
         self._labels = [self._lbl_in, self._lbl_out, self._hint_in, self._hint_out,
                         self._sb_index, self._sb_match, self._status_lbl, self._tab_sep,
                         self._search_count_lbl]
@@ -923,8 +924,7 @@ class TranslatorApp(_BaseTk):
             activebackground=t["accent"], activeforeground=t["accent_fg"])
         for btn in (self._copy_btn, self._save_btn, self._inspect_btn,
                     self._help_btn, self._history_btn,
-                    self._settings_btn, self._tools_btn,
-                    self._doctabs_newbtn,
+                    self._settings_btn, self._doctabs_newbtn,
                     *self._small_buttons):
             btn.configure(bg=t["muted_bg"], fg=t["muted_fg"],
                 activebackground=t["muted_bg"], activeforeground=t["muted_fg"])
@@ -1331,9 +1331,12 @@ class TranslatorApp(_BaseTk):
         # Translation Table mode was retired — silently coerce to Inline.
         if mode == "table":
             mode = "inline"
+        if mode not in ("inline", "designdoc", "logsql"):
+            mode = "inline"
         self._mode.set(mode)
         self._refresh_mode_tabs()
-        self.on_translate()
+        if mode != "logsql":
+            self.on_translate()
 
     def _set_direction(self, direction):
         self._direction.set(direction)
@@ -1382,7 +1385,8 @@ class TranslatorApp(_BaseTk):
             d["input"] = ""
         else:
             d["input"] = self.input_box.get("1.0", "end-1c")
-        d["mode"] = self._mode.get()
+        if self._mode.get() in ("inline", "designdoc"):
+            d["mode"] = self._mode.get()
         d["direction"] = self._direction.get()
         if not d.get("manual_title"):
             d["title"] = self._doctab_title(d["input"], self._active_doc)
@@ -1605,8 +1609,32 @@ class TranslatorApp(_BaseTk):
         mode = self._mode.get()
         style(self._tab_inline,    mode == "inline")
         style(self._tab_designdoc, mode == "designdoc")
+        style(self._tab_logsql,    mode == "logsql")
         style(self._tab_forward, self._direction.get() == "forward")
         style(self._tab_reverse, self._direction.get() == "reverse")
+        try:
+            if mode == "logsql":
+                self._doctabs_bar.pack_forget()
+                self._paned.pack_forget()
+                if not self._logsql_view or not self._logsql_view.winfo_exists():
+                    from .dialogs.log_sql import open_log_sql_dialog
+                    self._logsql_view = open_log_sql_dialog(
+                        self,
+                        self._logsql_host,
+                        embedded=True,
+                        on_close=lambda: self._set_mode("inline"),
+                    )
+                    self._logsql_view.pack(fill="both", expand=True)
+                if not self._logsql_host.winfo_ismapped():
+                    self._logsql_host.pack(fill="both", expand=True, padx=12, pady=(2, 0))
+            else:
+                self._logsql_host.pack_forget()
+                if not self._doctabs_bar.winfo_ismapped():
+                    self._doctabs_bar.pack(fill="x", padx=12, pady=(4, 0), after=self._topbar)
+                if not self._paned.winfo_ismapped():
+                    self._paned.pack(fill="both", expand=True, padx=12, pady=(2, 0), after=self._doctabs_bar)
+        except AttributeError:
+            pass
         # Toggle Design-Doc-specific controls
         try:
             if mode == "designdoc":
@@ -1660,6 +1688,8 @@ class TranslatorApp(_BaseTk):
     def on_translate(self):
         text = self._current_input()
         mode = self._mode.get()
+        if mode == "logsql":
+            return
         direction = self._direction.get()
         schemas = self._filter_schemas or None
         tables  = self._filter_tables  or None
@@ -2733,8 +2763,7 @@ class TranslatorApp(_BaseTk):
 
     def open_log_sql_dialog(self):
         """🛠 Tools → Extract SQL from log… (Ctrl+Shift+L)"""
-        from .dialogs.log_sql import open_log_sql_dialog
-        open_log_sql_dialog(self)
+        self._set_mode("logsql")
 
     def open_schema_browser_for_input(self):
         """Open Schema Browser pre-filtered to physical names found in the
@@ -2839,10 +2868,10 @@ class TranslatorApp(_BaseTk):
         pairs = [
             (self._tab_inline,   "Replace identifiers in place inside the original text (Inline Replace mode)"),
             (self._tab_designdoc,"Generate a structured Japanese design document from SQL (Design Doc mode)"),
+            (self._tab_logsql,   "Extract SQL from log in the main window (Ctrl+Shift+L)"),
             (self._tab_forward,  "Translate physical → logical names"),
             (self._tab_reverse,  "Translate logical → physical names"),
             (self._settings_btn, "Theme, layout, filter, exclusions, user map, file operations"),
-            (self._tools_btn,    "Extract SQL from log: parse stclibApp.log, fill ?-placeholders with bound params (Ctrl+Shift+L)"),
             (self._help_btn,     "Help & keyboard shortcuts (F1)"),
             (self._translate_btn,"Translate the input (Ctrl+Enter)"),
             (self._copy_btn,     "Copy output to clipboard (Ctrl+Shift+C)"),

@@ -39,6 +39,9 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   truncated from the dialog after a confirmation prompt, then the
   statement list, details pane, chip count, and mtime watcher refresh
   to the empty state.
+- **Extract SQL in the main window** - Extract SQL is now a top-level
+  workspace beside Inline Replace and Design Doc, so the usual log workflow
+  stays inside the main app instead of opening a separate sub-window.
 - **Filter dialog: dirty indicator + discard-changes guard** — while
   editing the Filter dialog, a small "● Unapplied changes" label appears
   in the footer the moment your selection differs from what's currently

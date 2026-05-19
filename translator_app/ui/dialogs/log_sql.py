@@ -67,22 +67,32 @@ def _dialog_geometry_near_parent(parent, width=DEFAULT_DIALOG_SIZE[0], height=DE
     return geometry_near_parent(parent, width, height, min_width=960, min_height=600)
 
 
-def open_log_sql_dialog(app):
-    """Open (or refocus) the Extract-SQL-from-log dialog."""
-    existing = getattr(app, "_log_sql_dialog", None)
-    if existing and existing.winfo_exists():
-        existing.lift()
-        existing.focus_force()
-        return
+def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
+    """Open the Extract-SQL-from-log UI.
+
+    By default this creates the historical popup dialog. When `embedded`
+    is true it builds the same UI into `parent` and returns the frame so the
+    main window can host Extract SQL as a first-class mode.
+    """
+    if not embedded:
+        existing = getattr(app, "_log_sql_dialog", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return existing
 
     t = THEMES[app._theme]
-    dlg = tk.Toplevel(app)
-    app._log_sql_dialog = dlg
-    dlg.title("Extract SQL from log")
-    place_dialog(dlg, app, *DEFAULT_DIALOG_SIZE, min_width=960, min_height=600)
-    dlg.minsize(960, 600)
+    if embedded:
+        dlg = tk.Frame(parent or app, bg=t["bg"])
+        app._log_sql_panel = dlg
+    else:
+        dlg = tk.Toplevel(app)
+        app._log_sql_dialog = dlg
+        dlg.title("Extract SQL from log")
+        place_dialog(dlg, app, *DEFAULT_DIALOG_SIZE, min_width=960, min_height=600)
+        dlg.minsize(960, 600)
+        dlg.transient(app)
     dlg.configure(bg=t["bg"])
-    dlg.transient(app)
 
     # ── Settings (with one-time migration from the v1 single-path shape)
     settings = app._settings.setdefault("log_sql", {})
@@ -860,7 +870,8 @@ def open_log_sql_dialog(app):
     direct_btn   = _btn(actions, "Direct mode…", lambda: _toggle_direct_mode())
     direct_btn.pack(side="left", padx=(0, 6))
 
-    _btn(actions, "Close", dlg.destroy).pack(side="right")
+    close_command = on_close if (embedded and on_close) else dlg.destroy
+    _btn(actions, "Back" if embedded else "Close", close_command).pack(side="right")
     send_btn = _btn(actions, "Send to translator input",
          lambda: _send_to_translator(), accent=True)
     send_btn.pack(side="right", padx=(0, 6))
@@ -1428,7 +1439,10 @@ def open_log_sql_dialog(app):
         _schedule_auto_reload()
 
     # ── Bindings + lifecycle ───────────────────────────────────────────
-    dlg.bind("<Escape>", lambda _e: dlg.destroy())
+    if embedded and on_close:
+        dlg.bind("<Escape>", lambda _e: on_close())
+    else:
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
     # Alt+1..9 — switch to the Nth recent log path. The digit is also
     # printed on each chip label so the hotkey is discoverable.
@@ -1450,8 +1464,11 @@ def open_log_sql_dialog(app):
         )
 
     def _on_destroy(_e=None):
-        if getattr(app, "_log_sql_dialog", None) is dlg:
+        if embedded and getattr(app, "_log_sql_panel", None) is dlg:
+            app._log_sql_panel = None
+        if not embedded and getattr(app, "_log_sql_dialog", None) is dlg:
             app._log_sql_dialog = None
     dlg.bind("<Destroy>", _on_destroy)
 
     search_entry.focus_set()
+    return dlg
