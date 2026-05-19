@@ -1094,3 +1094,13 @@ def read_log_file(path: str, encoding: str = "utf-8") -> str:
             return f.read().decode("latin-1", errors="replace")
     except OSError:
         return ""
+
+
+def clear_log_file(path: str) -> None:
+    """Truncate a log file in place.
+
+    Kept in the logic module so the UI's "Clear log" action has one small,
+    testable filesystem operation. Raises OSError for the caller to display.
+    """
+    with open(path, "w", encoding="utf-8"):
+        pass

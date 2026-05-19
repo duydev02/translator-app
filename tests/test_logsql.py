@@ -18,6 +18,7 @@ from translator_app.logsql import (
     combine_sql_params,
     combine_sql_params_marked,
     count_placeholders,
+    clear_log_file,
     extract_statement_type,
     extract_subst_ranges,
     extract_target_tables,
@@ -316,6 +317,15 @@ def test_find_last_entry_ignores_dangling_init_without_exec():
 
 def test_find_last_entry_returns_none_on_empty_log():
     assert find_last_entry("") is None
+
+def test_clear_log_file_truncates_file(tmp_path):
+    path = tmp_path / "stclibApp.log"
+    path.write_text("old log content\nSELECT 1\n", encoding="cp932")
+
+    clear_log_file(str(path))
+
+    assert path.exists()
+    assert path.read_text(encoding="utf-8") == ""
 
 
 # ── End-to-end against the real log shipped with the repo ─────────────────────

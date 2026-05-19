@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import os
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from ...config import save_settings
 from ...logsql import (
@@ -44,6 +44,7 @@ from ...logsql import (
     combine_sql_params,
     combine_sql_params_marked,
     count_placeholders,
+    clear_log_file,
     extract_subst_ranges,
     group_by_action,
     parse_log,
@@ -66,22 +67,32 @@ def _dialog_geometry_near_parent(parent, width=DEFAULT_DIALOG_SIZE[0], height=DE
     return geometry_near_parent(parent, width, height, min_width=960, min_height=600)
 
 
-def open_log_sql_dialog(app):
-    """Open (or refocus) the Extract-SQL-from-log dialog."""
-    existing = getattr(app, "_log_sql_dialog", None)
-    if existing and existing.winfo_exists():
-        existing.lift()
-        existing.focus_force()
-        return
+def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
+    """Open the Extract-SQL-from-log UI.
+
+    By default this creates the historical popup dialog. When `embedded`
+    is true it builds the same UI into `parent` and returns the frame so the
+    main window can host Extract SQL as a first-class mode.
+    """
+    if not embedded:
+        existing = getattr(app, "_log_sql_dialog", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return existing
 
     t = THEMES[app._theme]
-    dlg = tk.Toplevel(app)
-    app._log_sql_dialog = dlg
-    dlg.title("Extract SQL from log")
-    place_dialog(dlg, app, *DEFAULT_DIALOG_SIZE, min_width=960, min_height=600)
-    dlg.minsize(960, 600)
+    if embedded:
+        dlg = tk.Frame(parent or app, bg=t["bg"])
+        app._log_sql_panel = dlg
+    else:
+        dlg = tk.Toplevel(app)
+        app._log_sql_dialog = dlg
+        dlg.title("Extract SQL from log")
+        place_dialog(dlg, app, *DEFAULT_DIALOG_SIZE, min_width=960, min_height=600)
+        dlg.minsize(960, 600)
+        dlg.transient(app)
     dlg.configure(bg=t["bg"])
-    dlg.transient(app)
 
     # ── Settings (with one-time migration from the v1 single-path shape)
     settings = app._settings.setdefault("log_sql", {})
@@ -359,6 +370,43 @@ def open_log_sql_dialog(app):
         if chosen:
             _switch_to_path(chosen)
 
+    def _clear_active_log():
+        path = path_var.get().strip()
+        if not path:
+            _notice("Pick a log file to clear", accent=False)
+            return
+        if not os.path.exists(path):
+            _notice(f"File not found: {path}", accent=False)
+            return
+        ok = messagebox.askyesno(
+            "Clear log file",
+            "Clear all content from this log file?\n\n"
+            f"{path}\n\n"
+            "This cannot be undone.",
+            parent=dlg,
+        )
+        if not ok:
+            return
+        try:
+            clear_log_file(path)
+        except OSError as exc:
+            _notice(f"Clear failed: {exc}", accent=False)
+            return
+
+        chip_counts[path] = 0
+        state["actions"] = []
+        state["by_iid"] = {}
+        state["selected"] = None
+        _render_tree()
+        _load_statement(None)
+        _capture_mtime()
+        _redraw_chips()
+        _notice("Cleared log file")
+        try:
+            app._toast.show("Log file cleared", 1200, "success")
+        except Exception:
+            pass
+
     # Right-side action buttons
     tk.Button(
         actions_right, text="+ Add log", font=app._small, relief="flat", bd=0,
@@ -380,6 +428,24 @@ def open_log_sql_dialog(app):
             "Force re-parse the active log right now.\n"
             "Auto-reload will also pick up file changes within ~1.5s "
             "while this dialog is open.",
+        )
+    except Exception:
+        pass
+
+    clear_btn = tk.Button(
+        actions_right, text="Clear log", font=app._small, relief="flat", bd=0,
+        bg=t["muted_bg"], fg=t.get("danger", "#c14a4a"), padx=10, pady=3,
+        cursor="hand2",
+        activebackground=t["muted_bg"],
+        activeforeground=t.get("danger", "#c14a4a"),
+        command=_clear_active_log,
+    )
+    clear_btn.pack(side="left", padx=(0, 4))
+    try:
+        app._attach_tooltip(
+            clear_btn,
+            "Truncate the active log file after confirmation.\n"
+            "Useful before reproducing one action.",
         )
     except Exception:
         pass
@@ -804,7 +870,8 @@ def open_log_sql_dialog(app):
     direct_btn   = _btn(actions, "Direct mode…", lambda: _toggle_direct_mode())
     direct_btn.pack(side="left", padx=(0, 6))
 
-    _btn(actions, "Close", dlg.destroy).pack(side="right")
+    close_command = on_close if (embedded and on_close) else dlg.destroy
+    _btn(actions, "Back" if embedded else "Close", close_command).pack(side="right")
     send_btn = _btn(actions, "Send to translator input",
          lambda: _send_to_translator(), accent=True)
     send_btn.pack(side="right", padx=(0, 6))
@@ -1224,7 +1291,10 @@ def open_log_sql_dialog(app):
                 app.input_box.configure(state="normal")
                 app.input_box.delete("1.0", "end")
                 app.input_box.insert("1.0", text)
-                app.on_translate()
+                if embedded:
+                    app._set_mode("inline")
+                else:
+                    app.on_translate()
                 app._toast.show("Sent SQL into translator input", 1300, "success")
                 _notice("Sent into translator input", accent=True)
         except Exception:
@@ -1372,7 +1442,10 @@ def open_log_sql_dialog(app):
         _schedule_auto_reload()
 
     # ── Bindings + lifecycle ───────────────────────────────────────────
-    dlg.bind("<Escape>", lambda _e: dlg.destroy())
+    if embedded and on_close:
+        dlg.bind("<Escape>", lambda _e: on_close())
+    else:
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
     # Alt+1..9 — switch to the Nth recent log path. The digit is also
     # printed on each chip label so the hotkey is discoverable.
@@ -1394,8 +1467,11 @@ def open_log_sql_dialog(app):
         )
 
     def _on_destroy(_e=None):
-        if getattr(app, "_log_sql_dialog", None) is dlg:
+        if embedded and getattr(app, "_log_sql_panel", None) is dlg:
+            app._log_sql_panel = None
+        if not embedded and getattr(app, "_log_sql_dialog", None) is dlg:
             app._log_sql_dialog = None
     dlg.bind("<Destroy>", _on_destroy)
 
     search_entry.focus_set()
+    return dlg
