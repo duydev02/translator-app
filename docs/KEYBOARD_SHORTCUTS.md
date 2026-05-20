@@ -57,7 +57,7 @@ Also viewable in-app via **F1**.
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl + Shift + L` | 🛠 Extract SQL from log… (combine `?` placeholders with bound params from a `stclibApp.log`) |
+| `Ctrl + Shift + L` | Switch to Extract SQL workspace (combine `?` placeholders with bound params from a `stclibApp.log`) |
 
 ## Other
 
