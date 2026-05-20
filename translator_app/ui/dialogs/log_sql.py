@@ -45,6 +45,7 @@ from ...logsql import (
     combine_sql_params_marked,
     count_placeholders,
     clear_log_file,
+    extract_pasted_statement,
     extract_subst_ranges,
     group_by_action,
     parse_log,
@@ -1323,7 +1324,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     direct_panel.columnconfigure(2, weight=2, uniform="dcols")
     direct_panel.rowconfigure(1, weight=1)
 
-    for col, lbl in enumerate(("SQL (with ?)", "PARAM(S)", "RESULT")):
+    for col, lbl in enumerate(("SQL or copied log lines", "PARAM(S)", "RESULT")):
         tk.Label(direct_panel, text=lbl, font=app._ui_b,
                  bg=t["bg"], fg=t["fg"], anchor="w").grid(
             row=0, column=col, sticky="ew",
@@ -1353,11 +1354,21 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
 
     def _direct_process():
         sql = direct_sql.get("1.0", "end-1c")
-        params = parse_params(direct_params.get("1.0", "end-1c"))
+        params_raw = direct_params.get("1.0", "end-1c")
+        pasted = "\n".join(part for part in (sql, params_raw) if part.strip())
+        pasted_stmt = extract_pasted_statement(pasted)
+        if pasted_stmt is not None:
+            sql = pasted_stmt.sql
+            params_raw = pasted_stmt.params_raw
+            _set_text(direct_sql, sql)
+            _set_text(direct_params, params_raw)
+        params = parse_params(params_raw)
         _set_text(direct_result, pretty_sql(combine_sql_params(sql, params)))
         n_q = count_placeholders(sql)
         if n_q != len(params):
             _notice(f"⚠ {n_q} ?s vs {len(params)} params — counts don't match", accent=False)
+        elif pasted_stmt is not None:
+            _notice(f"Parsed log id={pasted_stmt.id} and combined {len(params)} param(s)")
         else:
             _notice(f"Combined {len(params)} param(s) into SQL")
 

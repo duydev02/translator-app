@@ -1013,6 +1013,23 @@ def find_last_entry(log_text: str) -> dict | None:
     return last.as_dict() | {"result": last.combined_sql()}
 
 
+def extract_pasted_statement(text: str) -> Statement | None:
+    """Return the newest complete prepared statement from pasted log text.
+
+    Direct mode often gets a small copied log fragment rather than a whole
+    file: one `CreatePreparedStatement` line plus the matching execute line.
+    Reuse `parse_log` so the fragment gets exactly the same id-pairing and
+    params parsing as Browse mode.
+    """
+    if not text:
+        return None
+    last: Statement | None = None
+    for stmt in parse_log(text):
+        if stmt.sql and stmt.params_raw:
+            last = stmt
+    return last
+
+
 # ── Internal scratch helpers ─────────────────────────────────────────────────
 def _extract_timestamp(line: str) -> str | None:
     m = _TIMESTAMP_RE.match(line)
