@@ -22,10 +22,12 @@ from translator_app.logsql import (
     extract_statement_type,
     extract_subst_ranges,
     extract_target_tables,
+    extract_pasted_statement,
     find_entry_by_id,
     find_last_entry,
     format_param,
     group_by_action,
+    keep_newest_repeated_sql,
     parse_log,
     parse_params,
     pretty_sql,
@@ -317,6 +319,71 @@ def test_find_last_entry_ignores_dangling_init_without_exec():
 
 def test_find_last_entry_returns_none_on_empty_log():
     assert find_last_entry("") is None
+
+
+def test_extract_pasted_statement_reads_copied_init_and_execute_lines():
+    pasted = """\
+2026-05-20 11:24:30,INFO,commons.dao.PreparedStatementEx,<init>              ,CreatePreparedStatement id=1f863b10   sql= SELECT A, B FROM DT_TEN_RECEIPT_SEISAN WHERE COMP_CD = ? AND KEIJO_DT = ? AND TENPO_CD = ?
+2026-05-20 11:24:30,INFO,commons.dao.PreparedStatementEx,executeQuery        ,PreparedStatement.executeQuery() id=1f863b10  params=[STRING:1:0000][STRING:2:20250612][STRING:3:001001]
+"""
+    stmt = extract_pasted_statement(pasted)
+
+    assert stmt is not None
+    assert stmt.id == "1f863b10"
+    assert stmt.sql.startswith("SELECT A, B")
+    assert stmt.params == [
+        ("STRING", "0000"),
+        ("STRING", "20250612"),
+        ("STRING", "001001"),
+    ]
+    assert stmt.combined_sql() == (
+        "SELECT A, B FROM DT_TEN_RECEIPT_SEISAN "
+        "WHERE COMP_CD = '0000' AND KEIJO_DT = '20250612' AND TENPO_CD = '001001'"
+    )
+
+
+def test_extract_pasted_statement_uses_newest_complete_pair():
+    pasted = _FAKE_LOG + (
+        "2026-01-01 00:00:02,DEBUG,commons.dao.PreparedStatementEx,<init>              ,"
+        "CreatePreparedStatement id=99999999   sql=SELECT 1\n"
+    )
+
+    stmt = extract_pasted_statement(pasted)
+
+    assert stmt is not None
+    assert stmt.id == "ef015678"
+
+
+def test_keep_newest_repeated_sql_keeps_latest_matching_shape():
+    older = Statement(
+        id="1111",
+        sql="SELECT * FROM VW_SAKUTAIHI WHERE A = ?",
+        fqcn="jp.co.example.HeaderCreateDao",
+        params=[("STRING", "old")],
+    )
+    newer = Statement(
+        id="2222",
+        sql=" SELECT  *  FROM  VW_SAKUTAIHI  WHERE  A = ? ",
+        fqcn="jp.co.example.HeaderCreateDao",
+        params=[("STRING", "new")],
+    )
+    other = Statement(
+        id="3333",
+        sql="SELECT * FROM VW_SAKUTAIHI WHERE B = ?",
+        fqcn="jp.co.example.HeaderCreateDao",
+        params=[("STRING", "different")],
+    )
+
+    assert keep_newest_repeated_sql([older, newer, other]) == [newer, other]
+
+
+def test_keep_newest_repeated_sql_does_not_merge_different_daos():
+    sql = "SELECT * FROM VW_SAKUTAIHI WHERE A = ?"
+    left = Statement(id="1111", sql=sql, fqcn="jp.co.example.HeaderCreateDao")
+    right = Statement(id="2222", sql=sql, fqcn="jp.co.example.DetailCreateDao")
+
+    assert keep_newest_repeated_sql([left, right]) == [left, right]
+
 
 def test_clear_log_file_truncates_file(tmp_path):
     path = tmp_path / "stclibApp.log"

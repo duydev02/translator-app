@@ -1013,6 +1013,50 @@ def find_last_entry(log_text: str) -> dict | None:
     return last.as_dict() | {"result": last.combined_sql()}
 
 
+def extract_pasted_statement(text: str) -> Statement | None:
+    """Return the newest complete prepared statement from pasted log text.
+
+    Direct mode often gets a small copied log fragment rather than a whole
+    file: one `CreatePreparedStatement` line plus the matching execute line.
+    Reuse `parse_log` so the fragment gets exactly the same id-pairing and
+    params parsing as Browse mode.
+    """
+    if not text:
+        return None
+    last: Statement | None = None
+    for stmt in parse_log(text):
+        if stmt.sql and stmt.params_raw:
+            last = stmt
+    return last
+
+
+def statement_repeat_key(stmt: Statement) -> tuple[str, str, str]:
+    """Stable key for hiding repeated statements in the UI.
+
+    Repeated log spam usually has a new prepared-statement id and new params,
+    but the same DAO and SQL shape. Params are intentionally excluded so
+    HeaderCreateDao-style repeat rows collapse to the newest query.
+    """
+    sql = " ".join((stmt.sql or "").split()).lower()
+    return ((stmt.dao_short or "").lower(), stmt.statement_type or "", sql)
+
+
+def keep_newest_repeated_sql(statements: list[Statement]) -> list[Statement]:
+    """Return statements with older repeated SQL shapes removed.
+
+    Order is preserved for the remaining rows. If statements 1, 2, and 3 have
+    the same repeat key, only statement 3 remains.
+    """
+    last_index_by_key = {
+        statement_repeat_key(stmt): idx
+        for idx, stmt in enumerate(statements)
+    }
+    return [
+        stmt for idx, stmt in enumerate(statements)
+        if last_index_by_key.get(statement_repeat_key(stmt)) == idx
+    ]
+
+
 # ── Internal scratch helpers ─────────────────────────────────────────────────
 def _extract_timestamp(line: str) -> str | None:
     m = _TIMESTAMP_RE.match(line)

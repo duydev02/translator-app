@@ -151,11 +151,11 @@ the app. Tables on the left, columns of the selected table on the right
 
 ---
 
-## 🛠 Extract SQL from log… (`Ctrl+Shift+L`)
+## Extract SQL from log (`Ctrl+Shift+L`)
 
-A dedicated button on the topbar next to *⚙ Settings* opens this — the
-log-extractor is the most-used dev utility so it earns a single-click
-home rather than living in a menu.
+Extract SQL is a main workspace tab beside **Inline Replace** and
+**Design Doc**. `Ctrl+Shift+L` switches straight to it, so the usual log
+workflow stays in the main window instead of a separate sub-window.
 
 Reads a `stclibApp.log` produced by `commons.dao.PreparedStatementEx`,
 parses **every** prepared statement it contains, surfaces the 1–2
@@ -167,14 +167,14 @@ runnable SQL.
 #### Browsing a log
 
 - **Log chips**: each recent path shows as a small button at the top of
-  the dialog (label = the last 2 path segments, e.g.
+  the workspace (label = the last 2 path segments, e.g.
   `…/mdw_lawmasterhansoku-web/log`). The active chip is highlighted —
   one click swaps the active log instantly. Right-click a chip for
   *Remove from list* / *Open containing folder*. **+ Add log** opens a
   file picker; up to 8 chips are kept.
 - **↻ Reload** force re-parses the active log right now.
 - **☑ Auto** (default ON) watches the active log file's mtime in the
-  background while the dialog is open — any change re-parses
+  background while the workspace is open — any change re-parses
   automatically (~1.5 s lag) and a quick toast pops up so you know it
   happened. Untick when you want full manual control.
 - The **statement list** is grouped under the user request that
@@ -192,6 +192,10 @@ runnable SQL.
 - **☑ Hide infrastructure** (default ON): only ★-primary statements
   show. Untick to see everything (every audit insert, every config
   read).
+- **☑ Hide repeats**: hides older repeated SQL rows inside each
+  user-action group and leaves the newest matching DAO + SQL shape, so
+  repeated `HeaderCreateDao` `SELECT`s collapse to the latest useful
+  statement.
 - **Click a statement** → its **Result (filled)**, then **SQL (with
   ?)**, then **Params** tabs render below. Result is the first tab
   because it's the one you usually want; the SQL in that tab is also
@@ -205,6 +209,9 @@ runnable SQL.
   their own accent + tint so you can see at a glance what came from
   the original SQL vs what the JDBC driver bound — even when the
   bound value is itself a string literal.
+- **Line numbers / Word wrap**: Extract SQL text panes follow the
+  app-wide **Settings** choices for line numbers and word wrap, matching
+  the normal translator editor.
 - **Sort by any column**: click the `Time` / `ID` / `DAO` / `Type` /
   `Tables` / `?` / `Score` headers to sort statements *within* each
   user-action group (the grouping itself is preserved). A `▼` / `▲`
@@ -237,17 +244,22 @@ runnable SQL.
 #### Result actions
 
 - **Copy result**: clipboard, ready to paste into your DB tool.
-- **Send to translator input**: replaces the active doc tab's input
-  with the runnable SQL and re-runs translation immediately, so
-  Inline Replace or Design Doc renders the Japanese names against
-  real values.
+- **Send to translator input**: switches back to normal Inline Replace,
+  replaces the active doc tab's input with the runnable SQL, and re-runs
+  translation immediately.
+- **Send to new tab**: opens the runnable SQL in a fresh translator tab
+  without replacing your current work.
 
 #### Direct mode
 
-A **Direct mode…** button swaps the body for a 3-pane view (paste SQL
-on the left, paste `[STRING:1:…]` blob in the middle, click Process to
-fill the result on the right). Useful when you don't have the log file
-handy — e.g. someone messaged you a snippet on chat. Same combiner.
+A **Direct mode…** button swaps the body for a 3-pane view. Paste a
+copied log fragment that contains both
+`CreatePreparedStatement ... sql=...` and
+`PreparedStatement.execute... params=...`, then click **Process**; the
+tool splits SQL and params automatically. You can still paste SQL on the
+left and a `[STRING:1:...]` params blob in the middle when you only have
+separate pieces. The result pane uses the same SQL syntax highlighting
+and bound-param highlighting as Browse mode.
 
 #### Param formatter
 

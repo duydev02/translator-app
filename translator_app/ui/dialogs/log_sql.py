@@ -41,12 +41,13 @@ from ...logsql import (
     DEFAULT_PRIMARY_THRESHOLD,
     Statement,
     annotate_scores,
-    combine_sql_params,
     combine_sql_params_marked,
     count_placeholders,
     clear_log_file,
+    extract_pasted_statement,
     extract_subst_ranges,
     group_by_action,
+    keep_newest_repeated_sql,
     parse_log,
     parse_params,
     pretty_sql,
@@ -54,7 +55,7 @@ from ...logsql import (
     tokenize_sql_for_highlight,
 )
 from ...themes import THEMES
-from ..widgets import install_treeview_cell_tooltip
+from ..widgets import LineNumberCanvas, install_treeview_cell_tooltip
 from .placement import geometry_near_parent, place_dialog
 
 
@@ -107,6 +108,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     settings.setdefault("noise_packages", list(DEFAULT_NOISE_PACKAGES))
     settings.setdefault("noise_tables",   list(DEFAULT_NOISE_TABLES))
     settings.setdefault("hide_infra", True)
+    settings.setdefault("hide_redundant", False)
     settings.setdefault("primary_threshold", DEFAULT_PRIMARY_THRESHOLD)
 
     # ── Mutable state ────────────────────────────────────────────────────
@@ -501,6 +503,23 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     )
     hide_infra_chk.pack(side="left", padx=(0, 8))
 
+    hide_redundant_var = tk.BooleanVar(value=bool(settings.get("hide_redundant", False)))
+    hide_redundant_chk = tk.Checkbutton(
+        filter_top, text="Hide repeats", variable=hide_redundant_var,
+        bg=t["bg"], fg=t["fg"], selectcolor=t["surface"],
+        activebackground=t["bg"], activeforeground=t["fg"],
+        font=app._ui, bd=0, highlightthickness=0,
+    )
+    hide_redundant_chk.pack(side="left", padx=(0, 8))
+    try:
+        app._attach_tooltip(
+            hide_redundant_chk,
+            "Hide older repeated SQL rows inside each action group,\n"
+            "leaving the newest matching DAO + SQL shape.",
+        )
+    except Exception:
+        pass
+
     counts_lbl = tk.Label(
         filter_top, text="", font=app._small,
         bg=t["bg"], fg=t["fg_muted"],
@@ -652,14 +671,57 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     nb = ttk.Notebook(detail_pane)
     nb.pack(fill="both", expand=True)
 
+    text_boxes: list[tk.Text] = []
+    line_canvases: list[LineNumberCanvas] = []
+
+    def _extract_wrap_mode():
+        try:
+            return tk.WORD if bool(app._word_wrap.get()) else tk.NONE
+        except Exception:
+            return tk.NONE
+
+    def _show_extract_line_numbers():
+        try:
+            return bool(app._show_line_numbers.get())
+        except Exception:
+            return False
+
+    def _register_text_box(frame, box):
+        text_boxes.append(box)
+        canvas = LineNumberCanvas(frame, box, lambda: THEMES[app._theme])
+        line_canvases.append(canvas)
+        box.configure(wrap=_extract_wrap_mode())
+
+    def _apply_extract_text_options():
+        wrap_mode = _extract_wrap_mode()
+        show_lines = _show_extract_line_numbers()
+        for box in text_boxes:
+            try:
+                box.configure(wrap=wrap_mode)
+            except Exception:
+                pass
+        for canvas in line_canvases:
+            try:
+                if show_lines and not canvas.winfo_ismapped():
+                    canvas.pack(side="left", fill="y", before=canvas.text)
+                elif not show_lines and canvas.winfo_ismapped():
+                    canvas.pack_forget()
+                if show_lines:
+                    canvas._schedule()
+            except Exception:
+                pass
+    app._log_sql_apply_text_options = _apply_extract_text_options
+
     def _make_text_tab(parent_label):
         frame = tk.Frame(nb, bg=t["bg"])
         box = scrolledtext.ScrolledText(
-            frame, wrap=tk.NONE, font=app._mono, undo=True,
+            frame, wrap=_extract_wrap_mode(), font=app._mono, undo=True,
             bg=t["output_bg"], fg=t["fg"], insertbackground=t["insert"],
             relief="flat", borderwidth=0,
         )
-        box.pack(fill="both", expand=True)
+        _register_text_box(frame, box)
+        box.pack(side="left", fill="both", expand=True)
+        _apply_extract_text_options()
         nb.add(frame, text=parent_label)
         return box
 
@@ -706,12 +768,16 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     except Exception:
         pass
 
+    result_text_frame = tk.Frame(result_frame, bg=t["bg"])
+    result_text_frame.pack(fill="both", expand=True)
     result_box = scrolledtext.ScrolledText(
-        result_frame, wrap=tk.NONE, font=app._mono, undo=True,
+        result_text_frame, wrap=_extract_wrap_mode(), font=app._mono, undo=True,
         bg=t["output_bg"], fg=t["fg"], insertbackground=t["insert"],
         relief="flat", borderwidth=0,
     )
-    result_box.pack(fill="both", expand=True)
+    _register_text_box(result_text_frame, result_box)
+    result_box.pack(side="left", fill="both", expand=True)
+    _apply_extract_text_options()
     nb.add(result_frame, text="Result (filled)")
 
     # Highlight tag styling. Light-vs-dark-aware via the active theme.
@@ -731,17 +797,19 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         kw_color, str_color, num_color, com_color, sub_color = (
             "#0033b3", "#067d17", "#1750eb", "#8c8c8c", "#d36a00",
         )
-    result_box.tag_configure("hl_keyword", foreground=kw_color)
-    result_box.tag_configure("hl_string",  foreground=str_color)
-    result_box.tag_configure("hl_number",  foreground=num_color)
-    result_box.tag_configure("hl_comment", foreground=com_color)
-    # Substituted values get a strong tint AND a subtle background so they
-    # stand out even when they happen to be a string literal (which would
-    # otherwise share the string color). underline=False keeps them clean.
-    result_box.tag_configure(
-        "hl_subst",
-        foreground=sub_color, background=t.get("muted_bg", "#f0f0f0"),
-    )
+    def _configure_highlight_tags(box):
+        box.tag_configure("hl_keyword", foreground=kw_color)
+        box.tag_configure("hl_string",  foreground=str_color)
+        box.tag_configure("hl_number",  foreground=num_color)
+        box.tag_configure("hl_comment", foreground=com_color)
+        # Substituted values get a strong tint AND a subtle background so they
+        # stand out even when they happen to be a string literal (which would
+        # otherwise share the string color). underline=False keeps them clean.
+        box.tag_configure(
+            "hl_subst",
+            foreground=sub_color, background=t.get("muted_bg", "#f0f0f0"),
+        )
+    _configure_highlight_tags(result_box)
 
     # SQL tab — plain text (raw with ? placeholders, no formatting).
     sql_box    = _make_text_tab("SQL (with ?)")
@@ -959,6 +1027,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
 
         q = search_var.get().strip().lower()
         hide = bool(hide_infra_var.get())
+        hide_redundant = bool(hide_redundant_var.get())
         threshold = int(settings.get("primary_threshold", DEFAULT_PRIMARY_THRESHOLD))
 
         # Snapshot the type filter so we can include/exclude per statement.
@@ -973,6 +1042,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
 
         n_total = 0
         n_primary = 0
+        n_repeats_hidden = 0
 
         for action in state["actions"]:
             visible_kids: list[Statement] = []
@@ -1000,6 +1070,10 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
                     if q not in hay:
                         continue
                 visible_kids.append(s)
+            before_repeat_filter = len(visible_kids)
+            if hide_redundant:
+                visible_kids = keep_newest_repeated_sql(visible_kids)
+                n_repeats_hidden += before_repeat_filter - len(visible_kids)
             if not visible_kids:
                 continue
             # Apply column sort within this action group, if any.
@@ -1041,6 +1115,8 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
 
         # Counts label.
         suffix = f" · matching '{q}'" if q else ""
+        if n_repeats_hidden:
+            suffix += f"  ·  {n_repeats_hidden} repeats hidden"
         if hide:
             counts_lbl.configure(
                 text=f"Showing {n_primary} primary  ·  {n_total - n_primary} hidden{suffix}",
@@ -1053,34 +1129,30 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     # ── Result-pane rendering with tags ────────────────────────────────
     _HL_TAGS = ("hl_keyword", "hl_string", "hl_number", "hl_comment", "hl_subst")
 
+    def _render_sql_highlighted(box, text: str, subst_ranges: list[tuple[int, int]]):
+        box.configure(state="normal")
+        for tag in _HL_TAGS:
+            box.tag_remove(tag, "1.0", "end")
+        box.delete("1.0", "end")
+        if not text:
+            box.configure(state="disabled")
+            return
+        box.insert("1.0", text)
+        for start, end, kind in tokenize_sql_for_highlight(text):
+            box.tag_add(f"hl_{kind}",
+                        f"1.0 + {start} chars",
+                        f"1.0 + {end} chars")
+        for start, end in subst_ranges:
+            box.tag_add("hl_subst",
+                        f"1.0 + {start} chars",
+                        f"1.0 + {end} chars")
+        box.configure(state="disabled")
+
     def _render_result_highlighted(text: str, subst_ranges: list[tuple[int, int]]):
         """Render `text` into the result_box with SQL syntax highlighting
         (keyword/string/number/comment) plus a substituted-value tag
         applied to each (start, end) range in `subst_ranges`."""
-        result_box.configure(state="normal")
-        # Drop the old tag spans before deleting text — Tk preserves tag
-        # objects across delete/insert which would leak older highlights
-        # otherwise.
-        for tag in _HL_TAGS:
-            result_box.tag_remove(tag, "1.0", "end")
-        result_box.delete("1.0", "end")
-        if not text:
-            result_box.configure(state="disabled")
-            return
-        result_box.insert("1.0", text)
-        # Syntax highlighting first.
-        for start, end, kind in tokenize_sql_for_highlight(text):
-            result_box.tag_add(f"hl_{kind}",
-                               f"1.0 + {start} chars",
-                               f"1.0 + {end} chars")
-        # Substituted-value highlighting on top — its background tint
-        # plus accent foreground stays visible even when it overlaps a
-        # string-literal token from the syntax pass.
-        for start, end in subst_ranges:
-            result_box.tag_add("hl_subst",
-                               f"1.0 + {start} chars",
-                               f"1.0 + {end} chars")
-        result_box.configure(state="disabled")
+        _render_sql_highlighted(result_box, text, subst_ranges)
 
     # ── Statement loading ──────────────────────────────────────────────
     def _load_statement(stmt: Statement | None):
@@ -1243,6 +1315,13 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
             _render_tree()
     hide_infra_chk.configure(command=_on_hide_toggle)
 
+    def _on_hide_redundant_toggle():
+        settings["hide_redundant"] = bool(hide_redundant_var.get())
+        _save_settings_block()
+        if state["actions"]:
+            _render_tree()
+    hide_redundant_chk.configure(command=_on_hide_redundant_toggle)
+
     # Esc inside search clears it; otherwise dialog closes.
     def _esc_in_search(_e):
         if search_var.get():
@@ -1323,7 +1402,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     direct_panel.columnconfigure(2, weight=2, uniform="dcols")
     direct_panel.rowconfigure(1, weight=1)
 
-    for col, lbl in enumerate(("SQL (with ?)", "PARAM(S)", "RESULT")):
+    for col, lbl in enumerate(("SQL or copied log lines", "PARAM(S)", "RESULT")):
         tk.Label(direct_panel, text=lbl, font=app._ui_b,
                  bg=t["bg"], fg=t["fg"], anchor="w").grid(
             row=0, column=col, sticky="ew",
@@ -1336,16 +1415,19 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         frame.grid(row=1, column=col, sticky="nsew",
                    padx=(0 if col == 0 else 4, 4 if col != 2 else 0))
         box = scrolledtext.ScrolledText(
-            frame, wrap=tk.NONE, font=app._mono, undo=True,
+            frame, wrap=_extract_wrap_mode(), font=app._mono, undo=True,
             bg=t["output_bg"], fg=t["fg"], insertbackground=t["insert"],
             relief="flat", borderwidth=0,
         )
-        box.pack(fill="both", expand=True)
+        _register_text_box(frame, box)
+        box.pack(side="left", fill="both", expand=True)
+        _apply_extract_text_options()
         return box
 
     direct_sql    = _make_direct_text(0)
     direct_params = _make_direct_text(1)
     direct_result = _make_direct_text(2)
+    _configure_highlight_tags(direct_result)
     direct_result.configure(state="disabled")
 
     direct_actions = tk.Frame(direct_panel, bg=t["bg"])
@@ -1353,11 +1435,24 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
 
     def _direct_process():
         sql = direct_sql.get("1.0", "end-1c")
-        params = parse_params(direct_params.get("1.0", "end-1c"))
-        _set_text(direct_result, pretty_sql(combine_sql_params(sql, params)))
+        params_raw = direct_params.get("1.0", "end-1c")
+        pasted = "\n".join(part for part in (sql, params_raw) if part.strip())
+        pasted_stmt = extract_pasted_statement(pasted)
+        if pasted_stmt is not None:
+            sql = pasted_stmt.sql
+            params_raw = pasted_stmt.params_raw
+            _set_text(direct_sql, sql)
+            _set_text(direct_params, params_raw)
+        params = parse_params(params_raw)
+        marked, _ = combine_sql_params_marked(sql, params)
+        marked_pretty = pretty_sql(marked)
+        pretty, subst_ranges = extract_subst_ranges(marked_pretty)
+        _render_sql_highlighted(direct_result, pretty, subst_ranges)
         n_q = count_placeholders(sql)
         if n_q != len(params):
             _notice(f"⚠ {n_q} ?s vs {len(params)} params — counts don't match", accent=False)
+        elif pasted_stmt is not None:
+            _notice(f"Parsed log id={pasted_stmt.id} and combined {len(params)} param(s)")
         else:
             _notice(f"Combined {len(params)} param(s) into SQL")
 
@@ -1471,6 +1566,8 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
             app._log_sql_panel = None
         if not embedded and getattr(app, "_log_sql_dialog", None) is dlg:
             app._log_sql_dialog = None
+        if getattr(app, "_log_sql_apply_text_options", None) is _apply_extract_text_options:
+            app._log_sql_apply_text_options = None
     dlg.bind("<Destroy>", _on_destroy)
 
     search_entry.focus_set()
