@@ -690,8 +690,6 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         text_boxes.append(box)
         canvas = LineNumberCanvas(frame, box, lambda: THEMES[app._theme])
         line_canvases.append(canvas)
-        if _show_extract_line_numbers():
-            canvas.pack(side="left", fill="y", before=box)
         box.configure(wrap=_extract_wrap_mode())
 
     def _apply_extract_text_options():
@@ -723,6 +721,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         )
         _register_text_box(frame, box)
         box.pack(side="left", fill="both", expand=True)
+        _apply_extract_text_options()
         nb.add(frame, text=parent_label)
         return box
 
@@ -778,6 +777,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     )
     _register_text_box(result_text_frame, result_box)
     result_box.pack(side="left", fill="both", expand=True)
+    _apply_extract_text_options()
     nb.add(result_frame, text="Result (filled)")
 
     # Highlight tag styling. Light-vs-dark-aware via the active theme.
@@ -1421,6 +1421,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         )
         _register_text_box(frame, box)
         box.pack(side="left", fill="both", expand=True)
+        _apply_extract_text_options()
         return box
 
     direct_sql    = _make_direct_text(0)
