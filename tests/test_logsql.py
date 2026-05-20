@@ -27,6 +27,7 @@ from translator_app.logsql import (
     find_last_entry,
     format_param,
     group_by_action,
+    keep_newest_repeated_sql,
     parse_log,
     parse_params,
     pretty_sql,
@@ -351,6 +352,37 @@ def test_extract_pasted_statement_uses_newest_complete_pair():
 
     assert stmt is not None
     assert stmt.id == "ef015678"
+
+
+def test_keep_newest_repeated_sql_keeps_latest_matching_shape():
+    older = Statement(
+        id="1111",
+        sql="SELECT * FROM VW_SAKUTAIHI WHERE A = ?",
+        fqcn="jp.co.example.HeaderCreateDao",
+        params=[("STRING", "old")],
+    )
+    newer = Statement(
+        id="2222",
+        sql=" SELECT  *  FROM  VW_SAKUTAIHI  WHERE  A = ? ",
+        fqcn="jp.co.example.HeaderCreateDao",
+        params=[("STRING", "new")],
+    )
+    other = Statement(
+        id="3333",
+        sql="SELECT * FROM VW_SAKUTAIHI WHERE B = ?",
+        fqcn="jp.co.example.HeaderCreateDao",
+        params=[("STRING", "different")],
+    )
+
+    assert keep_newest_repeated_sql([older, newer, other]) == [newer, other]
+
+
+def test_keep_newest_repeated_sql_does_not_merge_different_daos():
+    sql = "SELECT * FROM VW_SAKUTAIHI WHERE A = ?"
+    left = Statement(id="1111", sql=sql, fqcn="jp.co.example.HeaderCreateDao")
+    right = Statement(id="2222", sql=sql, fqcn="jp.co.example.DetailCreateDao")
+
+    assert keep_newest_repeated_sql([left, right]) == [left, right]
 
 
 def test_clear_log_file_truncates_file(tmp_path):
