@@ -1160,6 +1160,12 @@ class TranslatorApp(_BaseTk):
             # Persist immediately so user choice survives crashes / forced
             # quits — `on_close` may be skipped if the process is killed.
             self._persist_pref("word_wrap", use_wrap)
+        try:
+            apply_logsql = getattr(self, "_log_sql_apply_text_options", None)
+            if apply_logsql:
+                apply_logsql()
+        except Exception:
+            pass
 
     def _persist_pref(self, key, value):
         """Update a single setting key and write the file right away.
@@ -1269,6 +1275,12 @@ class TranslatorApp(_BaseTk):
                 canvas._schedule()
             else:
                 canvas.pack_forget()
+        try:
+            apply_logsql = getattr(self, "_log_sql_apply_text_options", None)
+            if apply_logsql:
+                apply_logsql()
+        except Exception:
+            pass
 
     # ── Pane orientation ──────────────────────────────────────────────────────
     def _top_minsize(self):

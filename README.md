@@ -52,7 +52,7 @@ control); copy the sample to bootstrap a fresh clone.
 
 ### Built-in helpers
 
-- **🛠 Extract SQL from log…** (topbar button + `Ctrl+Shift+L`) — point at a `stclibApp.log`, browse every prepared statement grouped by user action, with the 1–2 primary business queries surfaced above infrastructure noise. The Result tab shows the SQL with `?` placeholders filled in from bound params, prettified, syntax-highlighted, and with bound values visually called out. Sortable columns; statement-type chips; auto-reload on file change; one click sends the runnable SQL into the translator's input so Inline Replace / Design Doc render against real values.
+- **Extract SQL from log** (main workspace tab + `Ctrl+Shift+L`) - point at a `stclibApp.log`, browse every prepared statement grouped by user action, with primary business queries surfaced above infrastructure noise. Includes sortable columns, statement-type chips, Hide repeats for repeated SQL spam, auto-reload on file change, Clear log, Direct-mode smart paste from copied log snippets, and one-click send into the translator.
 - **⚙ Filter** — multi-select schemas *and* tables. Tables list scopes to the selected schemas, hover tooltips respect the filter, and the menu label always reflects the active scope (e.g. `all 87 T` when nothing is checked). Custom entries (see User Map) always bypass filters.
 - **⊘ Exclusions** — strings that must be preserved as-is. Right-click any selection to add/remove. Whole-word matching for identifiers; substring for Japanese labels.
 - **🖉 User Map** — hand-curated `physical ↔ logical` overrides that win against the JSON. Edit in a table UI or in the raw `translator_custom_map.json` file.

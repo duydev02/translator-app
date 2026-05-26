@@ -44,6 +44,14 @@ Notable user-visible changes. Format loosely follows [Keep a Changelog](https://
   stays inside the main app instead of opening a separate sub-window. The
   topbar hides unrelated Phys/Logic direction controls in this workspace, and
   sending SQL back to the translator lands in a normal Inline tab.
+- **Extract SQL Direct mode smart paste** - Direct mode can now accept a
+  copied log fragment containing both `CreatePreparedStatement ... sql=...`
+  and `PreparedStatement.execute... params=...`; it splits the SQL/params and
+  builds the runnable result without manual copy/paste into separate boxes.
+- **Extract SQL readability controls** - Direct-mode results now use the same
+  substituted-param highlight as Browse mode, Extract SQL text panes follow
+  the app's Word wrap and Line numbers settings, and a new **Hide repeats**
+  checkbox collapses older repeated SQL rows inside each action group.
 - **Filter dialog: dirty indicator + discard-changes guard** — while
   editing the Filter dialog, a small "● Unapplied changes" label appears
   in the footer the moment your selection differs from what's currently
