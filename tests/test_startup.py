@@ -2,6 +2,11 @@ import json
 
 import translator
 from translator_app import config
+from translator_app.ui.app import (
+    _STARTUP_IN_PROGRESS_KEY,
+    _clear_startup_recovery,
+    _prepare_startup_recovery,
+)
 
 
 def test_main_returns_error_when_schema_is_missing(monkeypatch, tmp_path):
@@ -67,3 +72,25 @@ def test_save_and_load_settings_round_trip_unicode(monkeypatch, tmp_path):
 
     assert json.loads(settings_file.read_text(encoding="utf-8")) == payload
     assert config.load_settings() == payload
+
+
+def test_prepare_startup_recovery_marks_clean_launch_in_progress():
+    settings = {}
+
+    assert _prepare_startup_recovery(settings) is False
+    assert settings[_STARTUP_IN_PROGRESS_KEY] is True
+
+
+def test_prepare_startup_recovery_detects_previous_incomplete_launch():
+    settings = {_STARTUP_IN_PROGRESS_KEY: True, "mode": "logsql"}
+
+    assert _prepare_startup_recovery(settings) is True
+    assert settings[_STARTUP_IN_PROGRESS_KEY] is True
+
+
+def test_clear_startup_recovery_marks_launch_complete():
+    settings = {_STARTUP_IN_PROGRESS_KEY: True}
+
+    _clear_startup_recovery(settings)
+
+    assert settings[_STARTUP_IN_PROGRESS_KEY] is False

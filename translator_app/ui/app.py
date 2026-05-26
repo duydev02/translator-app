@@ -52,6 +52,7 @@ _STARTUP_LOG = os.path.join(BASE_DIR, "translator_startup.log")
 _APP_LOG = os.path.join(BASE_DIR, "translator_app.log")
 _DEFAULT_GEOMETRY = "1060x800"
 _GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)(?:[+-]\d+){0,2}$")
+_STARTUP_IN_PROGRESS_KEY = "_startup_in_progress"
 
 
 def _startup_log(message):
@@ -99,6 +100,24 @@ def _safe_active_doc(value, tab_count):
     except Exception:
         return 0
     return idx if 0 <= idx < tab_count else 0
+
+
+def _prepare_startup_recovery(settings):
+    """Mark this launch as in-progress and return whether the previous one
+    failed to reach the ready marker.
+
+    The flag is stored in the normal settings file because that is already the
+    durable per-project state. If Windows kills the process while Tk is still
+    painting or a restored mode is doing expensive work, the flag remains set
+    and the next launch can start conservatively.
+    """
+    recovery = bool(settings.get(_STARTUP_IN_PROGRESS_KEY))
+    settings[_STARTUP_IN_PROGRESS_KEY] = True
+    return recovery
+
+
+def _clear_startup_recovery(settings):
+    settings[_STARTUP_IN_PROGRESS_KEY] = False
 
 
 def _safe_geometry(value):
@@ -181,6 +200,14 @@ class TranslatorApp(_BaseTk):
         self._settings   = _sanitize_settings(load_settings())
         self._exclusions = load_exclusions()
         self._history    = load_history()
+        self._startup_recovery = _prepare_startup_recovery(self._settings)
+        if self._startup_recovery:
+            _startup_log("startup: recovery mode enabled")
+            self._settings["mode"] = "inline"
+        try:
+            save_settings(self._settings)
+        except Exception:
+            pass
         _startup_log("startup: settings loaded")
 
         # Load index
@@ -353,6 +380,7 @@ class TranslatorApp(_BaseTk):
         if not self._settings.get("welcomed", False):
             self.after(700, self._show_welcome_toast)
         self.after(10, self._finish_startup_wiring)
+        self.after(2500, self._mark_startup_complete)
         _startup_log("startup: ready for mainloop")
 
     def _show_startup_shell(self):
@@ -450,6 +478,13 @@ class TranslatorApp(_BaseTk):
             self._install_button_tooltips()
             _startup_log("startup: wiring tooltip/toast done")
 
+            if self._startup_recovery:
+                self._toast.show(
+                    "Safe startup: restored Inline mode after the previous launch did not finish.",
+                    4200, "warning",
+                )
+                _startup_log("startup: recovery toast shown")
+
             if _DND_AVAILABLE and bool(self._settings.get("enable_drag_drop", False)):
                 self.after(500, self._finish_drag_drop_wiring)
             else:
@@ -473,6 +508,9 @@ class TranslatorApp(_BaseTk):
 
     def _initial_translate(self):
         _startup_log("startup: initial translate begin")
+        if self._startup_recovery:
+            _startup_log("startup: initial translate skipped for recovery")
+            return
         try:
             self.on_translate()
             self._schedule_input_highlight()
@@ -483,6 +521,14 @@ class TranslatorApp(_BaseTk):
                 self._toast.show(f"Startup translate failed: {e}", 3000, "error")
             except Exception:
                 pass
+
+    def _mark_startup_complete(self):
+        try:
+            _clear_startup_recovery(self._settings)
+            save_settings(self._settings)
+            _startup_log("startup: completed")
+        except Exception:
+            _app_log("Startup completion marker failed", sys.exc_info())
 
     def report_callback_exception(self, exc, val, tb):
         _app_log("Unhandled Tk callback exception", (exc, val, tb))
@@ -2919,5 +2965,6 @@ class TranslatorApp(_BaseTk):
     # ── Close handler ─────────────────────────────────────────────────────────
     def on_close(self):
         from . import persistence as _p
+        _clear_startup_recovery(self._settings)
         _p.finalize_on_close(self)
         self.destroy()

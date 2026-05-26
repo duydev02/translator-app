@@ -309,3 +309,8 @@ slow. These actions keep schema data, User Map, exclusions, and history.
 Dialogs opened from **Settings** and **Extract SQL** are placed near the main
 window. On Windows multi-monitor setups, the app uses the parent window's
 native monitor so child windows stay on the same screen as the Translator app.
+
+If the previous launch did not finish cleanly, the next launch starts in a
+safer Inline mode, skips the first automatic translation, and shows a warning
+toast. This avoids immediately reopening a heavy restored mode while the window
+is still painting.
