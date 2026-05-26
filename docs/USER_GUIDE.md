@@ -208,7 +208,9 @@ runnable SQL.
   came from bound parameters** (the substitutions for each `?`) get
   their own accent + tint so you can see at a glance what came from
   the original SQL vs what the JDBC driver bound — even when the
-  bound value is itself a string literal.
+  bound value is itself a string literal. When the statement-list
+  search box has text, matching text is highlighted inside the Result
+  pane too.
 - **Line numbers / Word wrap**: Extract SQL text panes follow the
   app-wide **Settings** choices for line numbers and word wrap, matching
   the normal translator editor.
@@ -220,11 +222,12 @@ runnable SQL.
   search box — `SELECT / INSERT / UPDATE / DELETE / OTHER` plus
   `All` / `None` shortcuts. Untick types you don't care about right
   now; remembered per project across sessions.
-- **Result tab toolbar** — `📋 Copy` puts the prettified SQL on the
-  clipboard. `☑ Auto-copy` makes every selection auto-copy
-  immediately so you can click a row and just paste into your DB
-  tool — no second click. Toggling Auto-copy on with a statement
-  already selected copies it right away.
+- **Result tab toolbar** — `📋 Copy result` puts the prettified SQL on
+  the clipboard. **Copy options** can copy the formatted SQL, original
+  `?` SQL, params only, or an SQL + params summary. `☑ Auto-copy` makes
+  every selection auto-copy immediately so you can click a row and just
+  paste into your DB tool — no second click. Toggling Auto-copy on with
+  a statement already selected copies it right away.
 
 #### Defaults (per project, editable in `translator_settings.json`)
 
