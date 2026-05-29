@@ -176,6 +176,7 @@ runnable SQL.
 - **Recent logs panel**: below the active path, recent logs are shown in
   a compact table with last modified time, file size, parsed statement count,
   full path, and Open / Folder / Remove actions. Double-click a row to load it.
+  Use **Hide / Show** to reclaim vertical space; the choice is saved.
 - **↻ Reload** force re-parses the active log right now.
 - **☑ Auto** (default ON) watches the active log file's mtime in the
   background while the workspace is open — any change re-parses
