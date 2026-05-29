@@ -52,9 +52,9 @@ control); copy the sample to bootstrap a fresh clone.
 
 ### Built-in helpers
 
-- **Extract SQL from log** (main workspace tab + `Ctrl+Shift+L`) - point at a `stclibApp.log`, browse every prepared statement grouped by user action, with primary business queries surfaced above infrastructure noise. Includes sortable columns, statement-type chips, Hide repeats for repeated SQL spam, result search highlighting, copy options for formatted/original/params/summary output, auto-reload on file change, Clear log, Direct-mode smart paste from copied log snippets, and one-click send into the translator.
+- **Extract SQL from log** (main workspace tab + `Ctrl+Shift+L`) - point at a `stclibApp.log`, browse every prepared statement grouped by user action, with primary business queries surfaced above infrastructure noise. Includes a Recent logs panel, sortable columns, statement-type chips, Hide repeats for repeated SQL spam, result search highlighting, copy options for formatted/original/params/summary output, auto-reload on file change, Clear log, Direct-mode smart paste from copied log snippets, one-click send into the translator, and a Back to SQL row bridge from translated output.
 - **⚙ Filter** — multi-select schemas *and* tables. Tables list scopes to the selected schemas, hover tooltips respect the filter, and the menu label always reflects the active scope (e.g. `all 87 T` when nothing is checked). Custom entries (see User Map) always bypass filters.
-- **⊘ Exclusions** — strings that must be preserved as-is. Right-click any selection to add/remove. Whole-word matching for identifiers; substring for Japanese labels.
+- **⊘ Exclusions** — strings that must be preserved as-is. Right-click any selection to add/remove, or review the full list from Settings with search/highlight and delete-matching actions. Whole-word matching for identifiers; substring for Japanese labels.
 - **🖉 User Map** — hand-curated `physical ↔ logical` overrides that win against the JSON. Edit in a table UI or in the raw `translator_custom_map.json` file.
 - **⚠ Inconsistencies** — scans the JSON for columns with conflicting logical names across tables and lets you promote one variant to a User-Map override with one click.
 - **Section toggles** — persistent popup to hide / show any `■` section (processing overview, SQL names, target table, WHERE, JOINs, etc.).

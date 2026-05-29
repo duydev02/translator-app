@@ -31,6 +31,7 @@ from a chat). It swaps the body for a 3-column SQL/params/result view.
 from __future__ import annotations
 
 import os
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -123,6 +124,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         # score/time/dao/etc.
         "sort_col":  None,      # column id, e.g. "score"
         "sort_desc": True,      # most-useful direction for "score" first
+        "pending_select_id": "",
     }
 
     # ── Top: log file selector + reload ──────────────────────────────────
@@ -154,6 +156,48 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         bg=t["bg"], fg=t["fg_muted"], anchor="w", padx=4,
     )
     active_path_lbl.pack(fill="x", pady=(4, 0))
+
+    # Recent logs panel: denser than the chips, useful when paths look alike.
+    recent_panel = tk.Frame(header, bg=t["bg"])
+    recent_panel.pack(fill="x", pady=(6, 0))
+    recent_panel.rowconfigure(1, weight=1)
+    recent_panel.columnconfigure(0, weight=1)
+
+    recent_head = tk.Frame(recent_panel, bg=t["bg"])
+    recent_head.grid(row=0, column=0, sticky="ew")
+    tk.Label(
+        recent_head, text="Recent logs", font=app._small,
+        bg=t["bg"], fg=t["fg_muted"], anchor="w",
+    ).pack(side="left")
+    recent_hint = tk.Label(
+        recent_head, text="double-click to load", font=app._small,
+        bg=t["bg"], fg=t["fg_muted"], anchor="e",
+    )
+    recent_hint.pack(side="right")
+
+    recent_body = tk.Frame(recent_panel, bg=t["bg"])
+    recent_body.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+    recent_body.columnconfigure(0, weight=1)
+    recent_tree = ttk.Treeview(
+        recent_body,
+        columns=("name", "updated", "size", "count", "path"),
+        show="headings",
+        height=4,
+        style="Log.Treeview",
+    )
+    for col, label, width, stretch in (
+        ("name", "Log", 180, False),
+        ("updated", "Updated", 130, False),
+        ("size", "Size", 80, False),
+        ("count", "Statements", 90, False),
+        ("path", "Path", 520, True),
+    ):
+        recent_tree.heading(col, text=label)
+        recent_tree.column(col, width=width, stretch=stretch, anchor="w")
+    recent_tree.grid(row=0, column=0, sticky="ew")
+
+    recent_actions = tk.Frame(recent_body, bg=t["bg"])
+    recent_actions.grid(row=0, column=1, sticky="ns", padx=(8, 0))
 
     # Persistent per-path aliases (right-click → Rename…). Lets users
     # pin "lawdailyorder PROD" vs "lawdailyorder DEV" without staring
@@ -214,6 +258,63 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     # _on_path_chosen after a parse; rendered as a `(N)` badge on the
     # chip so users see at a glance which projects have data.
     chip_counts: dict[str, int] = {}
+
+    def _format_size(path: str) -> str:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return "missing"
+        units = ("B", "KB", "MB", "GB")
+        value = float(size)
+        unit = units[0]
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                break
+            value /= 1024
+        return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+
+    def _format_mtime(path: str) -> str:
+        try:
+            return time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
+        except OSError:
+            return "missing"
+
+    def _selected_recent_path() -> str:
+        sel = recent_tree.selection()
+        return recent_tree.set(sel[0], "path") if sel else ""
+
+    def _refresh_recent_panel():
+        recent_tree.delete(*recent_tree.get_children())
+        active = settings.get("active_path") or ""
+        for idx, path in enumerate(settings.get("recent_paths") or []):
+            tags = ("active_recent",) if path == active else ()
+            count = chip_counts.get(path)
+            recent_tree.insert(
+                "", "end", iid=f"recent:{idx}", tags=tags,
+                values=(
+                    _project_short_name(path),
+                    _format_mtime(path),
+                    _format_size(path),
+                    "" if count is None else str(count),
+                    path,
+                ),
+            )
+        recent_tree.tag_configure("active_recent", background=t["muted_bg"], foreground=t["fg"])
+
+    def _load_selected_recent():
+        path = _selected_recent_path()
+        if path:
+            _switch_to_path(path)
+
+    def _remove_selected_recent():
+        path = _selected_recent_path()
+        if path:
+            _remove_recent(path)
+
+    def _reveal_selected_recent():
+        path = _selected_recent_path()
+        if path:
+            _reveal(path)
 
     def _format_chip_label(path: str, idx: int, is_active: bool) -> str:
         """Build the chip display string:
@@ -305,6 +406,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
             chip.bind("<Button-3>", lambda e, m=menu:
                       m.tk_popup(e.x_root, e.y_root))
             chip_widgets.append(chip)
+        _refresh_recent_panel()
 
     def _rename_chip(path: str):
         """Prompt for a friendly alias for `path`, persist it, redraw."""
@@ -354,6 +456,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
                 path_var.set(settings["active_path"])
             _save_settings_block()
             _redraw_chips()
+            _refresh_recent_panel()
 
     def _reveal(path: str):
         try:
@@ -361,6 +464,27 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
             os.startfile(folder)  # Windows-only; harmless elsewhere if missing
         except Exception:
             _notice(f"Couldn't open folder: {path}", accent=False)
+
+    recent_tree.bind("<Double-Button-1>", lambda _e: _load_selected_recent())
+    tk.Button(
+        recent_actions, text="Open", font=app._small, relief="flat", bd=0,
+        bg=t["muted_bg"], fg=t["muted_fg"], padx=8, pady=2, cursor="hand2",
+        activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
+        command=_load_selected_recent,
+    ).pack(fill="x", pady=(0, 4))
+    tk.Button(
+        recent_actions, text="Folder", font=app._small, relief="flat", bd=0,
+        bg=t["muted_bg"], fg=t["muted_fg"], padx=8, pady=2, cursor="hand2",
+        activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
+        command=_reveal_selected_recent,
+    ).pack(fill="x", pady=(0, 4))
+    tk.Button(
+        recent_actions, text="Remove", font=app._small, relief="flat", bd=0,
+        bg=t["muted_bg"], fg=t.get("danger", "#c14a4a"), padx=8, pady=2,
+        cursor="hand2", activebackground=t["muted_bg"],
+        activeforeground=t.get("danger", "#c14a4a"),
+        command=_remove_selected_recent,
+    ).pack(fill="x")
 
     def _browse():
         initial = os.path.dirname(path_var.get()) if path_var.get() else os.getcwd()
@@ -400,6 +524,10 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         state["by_iid"] = {}
         state["selected"] = None
         _render_tree()
+        try:
+            app._set_logsql_status(path=path, count=0)
+        except Exception:
+            pass
         _load_statement(None)
         _capture_mtime()
         _redraw_chips()
@@ -1278,6 +1406,34 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
 
     tree.bind("<<TreeviewSelect>>", _on_tree_select)
 
+    def _select_statement_id(stmt_id: str) -> bool:
+        if not stmt_id:
+            return False
+        for iid, sx in state["by_iid"].items():
+            if sx.id == stmt_id:
+                tree.selection_set(iid)
+                tree.see(iid)
+                tree.focus(iid)
+                _load_statement(sx)
+                return True
+        return False
+
+    def _select_source(source: dict):
+        path = source.get("path") or ""
+        stmt_id = source.get("id") or ""
+        if path and path != path_var.get().strip():
+            state["pending_select_id"] = stmt_id
+            path_var.set(path)
+            settings["active_path"] = path
+            _redraw_chips()
+            _on_path_chosen(force=True)
+            return
+        if not _select_statement_id(stmt_id):
+            state["pending_select_id"] = stmt_id
+            _on_path_chosen(force=True)
+
+    app._log_sql_select_source = _select_source
+
     # ── Path-change → parse + score + render ───────────────────────────
     def _on_path_chosen(force: bool = False, _from_auto: bool = False):
         path = path_var.get().strip()
@@ -1311,8 +1467,18 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         state["actions"] = actions
         state["selected"] = None
         _render_tree()
+        try:
+            app._set_logsql_status(path=path, count=chip_counts[path])
+        except Exception:
+            pass
         _push_recent(path)
         _capture_mtime()
+
+        pending_id = state.get("pending_select_id") or ""
+        if pending_id and _select_statement_id(pending_id):
+            state["pending_select_id"] = ""
+            _notice(f"Returned to SQL row id={pending_id}")
+            return
 
         # Re-select previously-selected statement if it still exists —
         # particularly helpful for auto-reloads.
@@ -1459,6 +1625,20 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     def _copy_result():
         _copy_current_option("formatted")
 
+    def _current_source() -> dict | None:
+        if state["direct"]:
+            return None
+        sel = state.get("selected")
+        if not sel:
+            return None
+        return {
+            "kind": "logsql",
+            "id": sel.id,
+            "path": path_var.get().strip(),
+            "dao": sel.dao_short or "",
+            "type": sel.statement_type or "",
+        }
+
     def _send_to_translator(*, new_tab: bool = False):
         text = _current_result_text()
         if not text.strip():
@@ -1471,13 +1651,14 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
                 # already in the translator. Title hints at the source so
                 # the user can tell tabs apart at a glance.
                 title = _suggest_send_tab_title()
-                app._new_doc_tab(initial_input=text, title=title)
+                app._new_doc_tab(initial_input=text, title=title, source=_current_source())
                 app._toast.show(f"Sent to new tab: {title}", 1500, "success")
                 _notice("Sent to a new tab", accent=True)
             else:
                 app.input_box.configure(state="normal")
                 app.input_box.delete("1.0", "end")
                 app.input_box.insert("1.0", text)
+                app._remember_log_sql_source(_current_source())
                 if embedded:
                     app._set_mode("inline")
                 else:
@@ -1676,6 +1857,8 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
             app._log_sql_dialog = None
         if getattr(app, "_log_sql_apply_text_options", None) is _apply_extract_text_options:
             app._log_sql_apply_text_options = None
+        if getattr(app, "_log_sql_select_source", None) is _select_source:
+            app._log_sql_select_source = None
     dlg.bind("<Destroy>", _on_destroy)
 
     search_entry.focus_set()

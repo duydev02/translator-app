@@ -151,6 +151,7 @@ def _safe_doc_tabs(value, fallback_mode, fallback_direction):
                     fallback_direction,
                 ),
                 "manual_title": _safe_bool(d.get("manual_title"), False),
+                "source": d.get("source") if isinstance(d.get("source"), dict) else None,
             })
     if not tabs:
         tabs.append({
@@ -159,6 +160,7 @@ def _safe_doc_tabs(value, fallback_mode, fallback_direction):
             "mode": fallback_mode if fallback_mode in ("inline", "designdoc") else "inline",
             "direction": fallback_direction,
             "manual_title": False,
+            "source": None,
         })
     return tabs
 
@@ -260,6 +262,8 @@ class TranslatorApp(_BaseTk):
         self._table_context = set()
         self._tooltip       = None
         self._toast         = None
+        self._logsql_status = {"path": "", "count": 0}
+        self._last_logsql_source = None
 
         # Multi-input doc tabs — each entry: {title, input, mode, direction}
         # Shared across tabs: filter, exclusions, user map, theme, history, font.
@@ -277,6 +281,7 @@ class TranslatorApp(_BaseTk):
                 "mode":         tab_mode,
                 "direction":    d.get("direction") or self._direction.get(),
                 "manual_title": bool(d.get("manual_title", False)),
+                "source":       d.get("source") if isinstance(d.get("source"), dict) else None,
             })
         if not self._doctabs:
             self._doctabs.append({
@@ -284,6 +289,7 @@ class TranslatorApp(_BaseTk):
                 "mode": self._mode.get(),
                 "direction": self._direction.get(),
                 "manual_title": False,
+                "source": None,
             })
         self._active_doc = self._settings.get("active_doc", 0)
         if not (0 <= self._active_doc < len(self._doctabs)):
@@ -861,6 +867,11 @@ class TranslatorApp(_BaseTk):
             command=self.on_export)
         self._save_btn.pack(side="right", padx=(0, 6))
 
+        self._back_sql_btn = tk.Button(out_header, text="↩  Back to SQL row",
+            font=self._ui_b, relief="flat", padx=10, pady=2, cursor="hand2", bd=0,
+            command=self._back_to_log_sql_source)
+        self._back_sql_btn.pack(side="right", padx=(0, 6))
+
         self._hint_out = tk.Label(out_header, text="Ctrl+Shift+C copy · Ctrl+S save · Ctrl+F find",
             font=self._small, anchor="e")
         self._hint_out.pack(side="right", padx=(0, 10))
@@ -951,6 +962,8 @@ class TranslatorApp(_BaseTk):
         self._lbl_in.configure(fg=t["fg"])
         self._lbl_out.configure(fg=t["fg"])
         self._status_lbl.configure(fg=t["success"])
+        self._sb_index.configure(bg=t["bg"], fg=t["fg_muted"])
+        self._sb_match.configure(bg=t["bg"], fg=t["fg_muted"])
 
         # Big text boxes (+ their scrollbars)
         self.input_box.configure(bg=t["surface"], fg=t["fg"], insertbackground=t["insert"])
@@ -969,6 +982,7 @@ class TranslatorApp(_BaseTk):
             bg=t["accent"], fg=t["accent_fg"],
             activebackground=t["accent"], activeforeground=t["accent_fg"])
         for btn in (self._copy_btn, self._save_btn, self._inspect_btn,
+                    self._back_sql_btn,
                     self._help_btn, self._history_btn,
                     self._settings_btn, self._doctabs_newbtn,
                     *self._small_buttons):
@@ -1393,12 +1407,14 @@ class TranslatorApp(_BaseTk):
             mode = "inline"
         self._mode.set(mode)
         self._refresh_mode_tabs()
+        self._refresh_index_stats()
         if mode != "logsql":
             self.on_translate()
 
     def _set_direction(self, direction):
         self._direction.set(direction)
         self._refresh_mode_tabs()
+        self._refresh_index_stats()
         self._set_direction_label()
         self.on_translate()
         self._schedule_input_highlight()
@@ -1449,6 +1465,33 @@ class TranslatorApp(_BaseTk):
         if not d.get("manual_title"):
             d["title"] = self._doctab_title(d["input"], self._active_doc)
 
+    def _current_doc_source(self):
+        if not self._doctabs or not (0 <= self._active_doc < len(self._doctabs)):
+            return None
+        source = self._doctabs[self._active_doc].get("source")
+        return source if isinstance(source, dict) else None
+
+    def _remember_log_sql_source(self, source: dict | None):
+        if not self._doctabs:
+            return
+        self._doctabs[self._active_doc]["source"] = dict(source) if source else None
+        if source:
+            self._last_logsql_source = dict(source)
+        self._refresh_mode_tabs()
+
+    def _back_to_log_sql_source(self):
+        source = self._current_doc_source() or self._last_logsql_source
+        if not source:
+            try:
+                self._toast.show("No Extract SQL source saved for this tab", 1400, "info")
+            except Exception:
+                pass
+            return
+        self._set_mode("logsql")
+        selector = getattr(self, "_log_sql_select_source", None)
+        if selector:
+            self.after(80, lambda: selector(source))
+
     def _load_doc(self, i, translate=True):
         d = self._doctabs[i]
         self._clear_placeholder()
@@ -1472,7 +1515,8 @@ class TranslatorApp(_BaseTk):
         self._capture_active_doc()
         self._load_doc(i)
 
-    def _new_doc_tab(self, *, initial_input: str = "", title: str | None = None):
+    def _new_doc_tab(self, *, initial_input: str = "", title: str | None = None,
+                     source: dict | None = None):
         """Create a new doc tab. Optional `initial_input` seeds the input
         box (used by Extract SQL → Send to new tab). Optional `title` sets
         a manual title (so it shows the 🔒 lock and won't auto-rename)."""
@@ -1484,6 +1528,7 @@ class TranslatorApp(_BaseTk):
             "mode":         self._mode.get() if self._mode.get() in ("inline", "designdoc") else "inline",
             "direction":    self._direction.get(),
             "manual_title": bool(title),
+            "source":       source,
         })
         self._load_doc(len(self._doctabs) - 1)
 
@@ -1605,6 +1650,7 @@ class TranslatorApp(_BaseTk):
             "mode":         src.get("mode", self._mode.get()),
             "direction":    src.get("direction", self._direction.get()),
             "manual_title": True,
+            "source":       src.get("source") if isinstance(src.get("source"), dict) else None,
         }
         self._doctabs.insert(i + 1, copy)
         self._load_doc(i + 1)
@@ -1709,6 +1755,12 @@ class TranslatorApp(_BaseTk):
             pass
         # Toggle Design-Doc-specific controls
         try:
+            source = self._current_doc_source()
+            if source and mode != "logsql":
+                if not self._back_sql_btn.winfo_ismapped():
+                    self._back_sql_btn.pack(side="right", padx=(0, 6), before=self._save_btn)
+            else:
+                self._back_sql_btn.pack_forget()
             if mode == "designdoc":
                 self._upper_chk.pack(side="left", padx=(10, 0))
                 self._sections_mb.pack(side="left", padx=(6, 0))
@@ -2714,12 +2766,14 @@ class TranslatorApp(_BaseTk):
         n = len(self._exclusions)
         label = f"⊘  Exclusions… ({n})" if n else "⊘  Exclusions…"
         self._settings_menu.entryconfigure(self._SETTINGS_IDX_EXCL, label=label)
+        self._refresh_index_stats()
 
     # ── User map button + dialog ──────────────────────────────────────────────
     def _refresh_umap_btn(self):
         n = len((self._user_map.get("tables") or {})) + len((self._user_map.get("columns") or {}))
         label = f"🖉  User Map… ({n})" if n else "🖉  User Map…"
         self._settings_menu.entryconfigure(self._SETTINGS_IDX_UMAP, label=label)
+        self._refresh_index_stats()
 
     def open_user_map_dialog(self):
         from .dialogs.user_map import open_user_map_dialog
@@ -2905,6 +2959,7 @@ class TranslatorApp(_BaseTk):
             "mode": "inline",
             "direction": "forward",
             "manual_title": False,
+            "source": None,
         }]
         self._active_doc = 0
         self._settings["doc_tabs"] = [dict(self._doctabs[0])]
@@ -2958,9 +3013,24 @@ class TranslatorApp(_BaseTk):
             except Exception:
                 pass
     def _refresh_index_stats(self):
+        mode_label = {
+            "inline": "Inline",
+            "designdoc": "Design Doc",
+            "logsql": "Extract SQL",
+        }.get(self._mode.get(), self._mode.get())
+        custom_count = len(self._user_map.get("tables", {})) + len(self._user_map.get("columns", {}))
         self._sb_index.configure(
-            text=f"  ● {len(self.table_index)} tables · {len(self.column_index)} columns · "
-                 f"{len(self.schemas)} schema(s) loaded")
+            text=f"  {mode_label} · {len(self.table_index)} tables · {len(self.column_index)} columns · "
+                 f"{custom_count} custom · {len(self._exclusions)} exclusions")
+        if self._mode.get() == "logsql":
+            status = getattr(self, "_logsql_status", {}) or {}
+            path = os.path.basename(status.get("path") or "") or "no log"
+            count = int(status.get("count") or 0)
+            self._sb_match.configure(text=f"{path} · {count} SQL rows  ")
+
+    def _set_logsql_status(self, *, path: str = "", count: int = 0):
+        self._logsql_status = {"path": path or "", "count": int(count or 0)}
+        self._refresh_index_stats()
 
     # ── Close handler ─────────────────────────────────────────────────────────
     def on_close(self):
