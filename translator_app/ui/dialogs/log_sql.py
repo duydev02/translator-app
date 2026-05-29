@@ -735,17 +735,39 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     result_toolbar.pack(fill="x", pady=(0, 4))
 
     copy_result_btn = tk.Button(
-        result_toolbar, text="📋  Copy", font=app._small,
+        result_toolbar, text="📋  Copy result", font=app._small,
         relief="flat", bd=0, bg=t["muted_bg"], fg=t["muted_fg"],
         padx=10, pady=3, cursor="hand2",
         activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
         command=lambda: _copy_result(),
     )
     copy_result_btn.pack(side="left")
+    copy_menu_btn = tk.Menubutton(
+        result_toolbar, text="Copy options ▾", font=app._small,
+        relief="flat", bd=0, bg=t["muted_bg"], fg=t["muted_fg"],
+        padx=10, pady=3, cursor="hand2",
+        activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
+    )
+    copy_menu = tk.Menu(copy_menu_btn, tearoff=False, bg=t["surface"], fg=t["fg"])
+    copy_menu.add_command(label="Copy formatted SQL",
+                          command=lambda: _copy_current_option("formatted"))
+    copy_menu.add_command(label="Copy original SQL",
+                          command=lambda: _copy_current_option("original"))
+    copy_menu.add_command(label="Copy params only",
+                          command=lambda: _copy_current_option("params"))
+    copy_menu.add_separator()
+    copy_menu.add_command(label="Copy SQL + params summary",
+                          command=lambda: _copy_current_option("summary"))
+    copy_menu_btn.configure(menu=copy_menu)
+    copy_menu_btn.pack(side="left", padx=(6, 0))
     try:
         app._attach_tooltip(
             copy_result_btn,
             "Copy the prettified result SQL to the clipboard.",
+        )
+        app._attach_tooltip(
+            copy_menu_btn,
+            "Copy the selected statement in another useful format.",
         )
     except Exception:
         pass
@@ -802,6 +824,11 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         box.tag_configure("hl_string",  foreground=str_color)
         box.tag_configure("hl_number",  foreground=num_color)
         box.tag_configure("hl_comment", foreground=com_color)
+        box.tag_configure(
+            "hl_search",
+            background=t.get("tag_search", "#ffd966"),
+            foreground=t.get("accent_fg", "#000000"),
+        )
         # Substituted values get a strong tint AND a subtle background so they
         # stand out even when they happen to be a string literal (which would
         # otherwise share the string color). underline=False keeps them clean.
@@ -1131,7 +1158,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
 
     def _render_sql_highlighted(box, text: str, subst_ranges: list[tuple[int, int]]):
         box.configure(state="normal")
-        for tag in _HL_TAGS:
+        for tag in (*_HL_TAGS, "hl_search"):
             box.tag_remove(tag, "1.0", "end")
         box.delete("1.0", "end")
         if not text:
@@ -1146,6 +1173,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
             box.tag_add("hl_subst",
                         f"1.0 + {start} chars",
                         f"1.0 + {end} chars")
+        _highlight_result_search(box)
         box.configure(state="disabled")
 
     def _render_result_highlighted(text: str, subst_ranges: list[tuple[int, int]]):
@@ -1153,6 +1181,33 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         (keyword/string/number/comment) plus a substituted-value tag
         applied to each (start, end) range in `subst_ranges`."""
         _render_sql_highlighted(result_box, text, subst_ranges)
+
+    def _highlight_result_search(box=None):
+        """Mirror the statement-list search term inside the active SQL text.
+
+        The search box already filters the tree. Highlighting the same term in
+        the Result tab makes long SQL easier to scan after picking a match.
+        """
+        target = box or result_box
+        try:
+            was_disabled = (target.cget("state") == "disabled")
+            if was_disabled:
+                target.configure(state="normal")
+            target.tag_remove("hl_search", "1.0", "end")
+            query = search_var.get().strip()
+            if query:
+                pos = "1.0"
+                while True:
+                    idx = target.search(query, pos, stopindex="end", nocase=True)
+                    if not idx:
+                        break
+                    end = f"{idx}+{len(query)}c"
+                    target.tag_add("hl_search", idx, end)
+                    pos = end
+            if was_disabled:
+                target.configure(state="disabled")
+        except Exception:
+            pass
 
     # ── Statement loading ──────────────────────────────────────────────
     def _load_statement(stmt: Statement | None):
@@ -1306,6 +1361,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     def _on_search(*_):
         if state["actions"]:
             _render_tree()
+        _highlight_result_search(result_box)
     search_var.trace_add("write", _on_search)
 
     def _on_hide_toggle():
@@ -1339,17 +1395,69 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
             return _get_direct_result()
         return result_box.get("1.0", "end-1c") if state["selected"] else ""
 
-    def _copy_result():
-        text = _current_result_text()
+    def _current_original_sql() -> str:
+        if state["direct"]:
+            return direct_sql.get("1.0", "end-1c")
+        sel = state.get("selected")
+        return sel.sql if sel else ""
+
+    def _current_params_text() -> str:
+        if state["direct"]:
+            return direct_params.get("1.0", "end-1c")
+        sel = state.get("selected")
+        if not sel:
+            return ""
+        if sel.params_raw:
+            return sel.params_raw
+        return "\n".join(f"[{typ}:{i}:{val}]" for i, (typ, val) in enumerate(sel.params, start=1))
+
+    def _current_summary_text() -> str:
+        result = _current_result_text()
+        original = _current_original_sql()
+        params = _current_params_text()
+        if not (result.strip() or original.strip() or params.strip()):
+            return ""
+        lines = []
+        if state["direct"]:
+            lines.append("Source: Direct extract")
+        else:
+            sel = state.get("selected")
+            if sel:
+                lines.append(f"ID: {sel.id or '(unknown)'}")
+                lines.append(f"DAO: {sel.dao_short or '(unknown)'}")
+                if sel.fqcn:
+                    lines.append(f"Class: {sel.fqcn}")
+        if original.strip():
+            lines.extend(("", "Original SQL:", original.rstrip()))
+        if params.strip():
+            lines.extend(("", "Params:", params.rstrip()))
+        if result.strip():
+            lines.extend(("", "Formatted SQL:", result.rstrip()))
+        return "\n".join(lines).strip()
+
+    def _copy_text_to_clipboard(text: str, label: str):
         if not text.strip():
-            _notice("Nothing to copy yet", accent=False)
+            _notice(f"Nothing to copy for {label}", accent=False)
             return
         try:
             app.clipboard_clear()
             app.clipboard_append(text)
-            app._toast.show("Result copied to clipboard", 1100, "success")
+            app._toast.show(f"{label} copied to clipboard", 1100, "success")
         except Exception:
             _notice("Clipboard copy failed", accent=False)
+
+    def _copy_current_option(kind: str):
+        if kind == "original":
+            _copy_text_to_clipboard(_current_original_sql(), "Original SQL")
+        elif kind == "params":
+            _copy_text_to_clipboard(_current_params_text(), "Params")
+        elif kind == "summary":
+            _copy_text_to_clipboard(_current_summary_text(), "SQL + params summary")
+        else:
+            _copy_text_to_clipboard(_current_result_text(), "Formatted SQL")
+
+    def _copy_result():
+        _copy_current_option("formatted")
 
     def _send_to_translator(*, new_tab: bool = False):
         text = _current_result_text()
