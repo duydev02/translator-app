@@ -201,12 +201,15 @@ runnable SQL.
   repeated `HeaderCreateDao` `SELECT`s collapse to the latest useful
   statement.
 - **Click a statement** → its **Result (filled)**, then **SQL (with
-  ?)**, then **Params** tabs render below. Result is the first tab
-  because it's the one you usually want; the SQL in that tab is also
-  *prettified* — line breaks at major clauses (SELECT / FROM / WHERE /
+  ?)**, **Params**, then **Why score?** tabs render below. Result is the
+  first tab because it's the one you usually want; the SQL in that tab is
+  also *prettified* — line breaks at major clauses (SELECT / FROM / WHERE /
   ORDER BY / GROUP BY / HAVING / UNION / WITH / VALUES …), each JOIN
-  and AND/OR indented under its parent. The first ★-primary statement
-  is auto-selected after each load so you usually need zero clicks.
+  and AND/OR indented under its parent. The first ★-primary statement is
+  auto-selected after each load so you usually need zero clicks.
+- **Why score?** explains the row's Score column by listing each positive
+  and negative scoring reason, the threshold, DAO, detected tables, params,
+  and SQL length. This makes the ★ primary ranking auditable.
 - **Result pane highlights**: SQL keywords, string literals, numbers,
   and comments render in distinct theme-aware colors. **Values that
   came from bound parameters** (the substitutions for each `?`) get
@@ -218,6 +221,9 @@ runnable SQL.
 - **Line numbers / Word wrap**: Extract SQL text panes follow the
   app-wide **Settings** choices for line numbers and word wrap, matching
   the normal translator editor.
+- **Schema lookup from SQL**: right-click a physical table or column name
+  inside the Result or SQL tab and choose **Open Schema Browser** to inspect
+  that name without copying it.
 - **Sort by any column**: click the `Time` / `ID` / `DAO` / `Type` /
   `Tables` / `?` / `Score` headers to sort statements *within* each
   user-action group (the grouping itself is preserved). A `▼` / `▲`
