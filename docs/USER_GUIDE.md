@@ -73,8 +73,9 @@ Strings that must be preserved as-is during translation *and* hidden from
 hover tooltips.
 
 - **Quick add/remove**: select text in any pane, right-click, pick from menu.
-- **Bulk edit**: click `⊘ Exclusions` to open the editor dialog (Ctrl+D deletes
-  current line, Ctrl+Z/Y undo/redo).
+- **Review/edit**: click `⊘ Exclusions` to open the editor dialog. The dialog
+  has a search box that highlights matches, a count, **Delete matches** for
+  quick cleanup, and Ctrl+D / Ctrl+Z / Ctrl+Y for line delete and undo/redo.
 - **Whole-word rule**: entries that are pure identifiers (A-Z, digits, `_`)
   match only as whole words — so `ON` stays silent in SQL keywords while
   leaving `SYSTEM_CONTROL` untouched.
@@ -172,6 +173,9 @@ runnable SQL.
   one click swaps the active log instantly. Right-click a chip for
   *Remove from list* / *Open containing folder*. **+ Add log** opens a
   file picker; up to 8 chips are kept.
+- **Recent logs panel**: below the active path, recent logs are shown in
+  a compact table with last modified time, file size, parsed statement count,
+  full path, and Open / Folder / Remove actions. Double-click a row to load it.
 - **↻ Reload** force re-parses the active log right now.
 - **☑ Auto** (default ON) watches the active log file's mtime in the
   background while the workspace is open — any change re-parses
@@ -249,9 +253,10 @@ runnable SQL.
 - **Copy result**: clipboard, ready to paste into your DB tool.
 - **Send to translator input**: switches back to normal Inline Replace,
   replaces the active doc tab's input with the runnable SQL, and re-runs
-  translation immediately.
+  translation immediately. The translated tab remembers the source row so
+  **Back to SQL row** can jump back to the original Extract SQL statement.
 - **Send to new tab**: opens the runnable SQL in a fresh translator tab
-  without replacing your current work.
+  without replacing your current work, also preserving the source-row link.
 
 #### Direct mode
 
@@ -294,6 +299,9 @@ count is shown next to the search field. `Esc` closes the bar.
 - `☀ Light` / `🌙 Dark` — Catppuccin palette in both variants.
 - `⬌ Horizontal` / `⬍ Vertical` — split orientation; preserves all state.
 - `Ctrl + = / Ctrl + - / Ctrl + 0` — font size up/down/reset.
+- The bottom status bar shows the active mode, loaded schema size, User Map
+  count, exclusion count, and, in Extract SQL mode, the active log + parsed SQL
+  row count.
 
 All preferences, window size, and layout are persisted between sessions.
 

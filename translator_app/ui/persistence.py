@@ -40,6 +40,7 @@ def serialize_doc_tabs(app):
             "mode":         d.get("mode", "inline"),
             "direction":    d.get("direction", "forward"),
             "manual_title": bool(d.get("manual_title", False)),
+            "source":       d.get("source") if isinstance(d.get("source"), dict) else None,
         }
         for d in app._doctabs
     ]
