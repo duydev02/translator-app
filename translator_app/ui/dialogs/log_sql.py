@@ -506,15 +506,15 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
             return
         ok = messagebox.askyesno(
             "Clear log file",
-            "Clear all content from this log file?\n\n"
+            "Archive this log file, then clear all current content?\n\n"
             f"{path}\n\n"
-            "This cannot be undone.",
+            "The archive is saved next to the log in an archive folder.",
             parent=dlg,
         )
         if not ok:
             return
         try:
-            clear_log_file(path)
+            archive_path = clear_log_file(path)
         except OSError as exc:
             _notice(f"Clear failed: {exc}", accent=False)
             return
@@ -531,9 +531,12 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         _load_statement(None)
         _capture_mtime()
         _redraw_chips()
-        _notice("Cleared log file")
+        if archive_path:
+            _notice(f"Archived then cleared: {os.path.basename(archive_path)}")
+        else:
+            _notice("Cleared empty log file")
         try:
-            app._toast.show("Log file cleared", 1200, "success")
+            app._toast.show("Log archived and cleared", 1400, "success")
         except Exception:
             pass
 
@@ -574,7 +577,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     try:
         app._attach_tooltip(
             clear_btn,
-            "Truncate the active log file after confirmation.\n"
+            "Archive, then truncate the active log file after confirmation.\n"
             "Useful before reproducing one action.",
         )
     except Exception:

@@ -177,6 +177,9 @@ runnable SQL.
   a compact table with last modified time, file size, parsed statement count,
   full path, and Open / Folder / Remove actions. Double-click a row to load it.
 - **↻ Reload** force re-parses the active log right now.
+- **Clear log** archives the active log to a sibling `archive` folder, then
+  truncates the original file. This keeps the old content available while
+  giving you a clean log before reproducing one action.
 - **☑ Auto** (default ON) watches the active log file's mtime in the
   background while the workspace is open — any change re-parses
   automatically (~1.5 s lag) and a quick toast pops up so you know it

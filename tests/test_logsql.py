@@ -15,6 +15,7 @@ from translator_app.logsql import (
     SUBST_OPEN,
     Statement,
     annotate_scores,
+    archive_log_file,
     combine_sql_params,
     combine_sql_params_marked,
     count_placeholders,
@@ -387,12 +388,35 @@ def test_keep_newest_repeated_sql_does_not_merge_different_daos():
 
 def test_clear_log_file_truncates_file(tmp_path):
     path = tmp_path / "stclibApp.log"
-    path.write_text("old log content\nSELECT 1\n", encoding="cp932")
+    original = "old log content\nSELECT 1\n".encode("cp932")
+    path.write_bytes(original)
 
-    clear_log_file(str(path))
+    archive_path = clear_log_file(str(path))
 
     assert path.exists()
     assert path.read_text(encoding="utf-8") == ""
+    assert archive_path is not None
+    assert Path(archive_path).exists()
+    assert Path(archive_path).read_bytes() == original
+
+
+def test_clear_log_file_can_skip_archive(tmp_path):
+    path = tmp_path / "stclibApp.log"
+    path.write_text("old log content\n", encoding="utf-8")
+
+    archive_path = clear_log_file(str(path), archive=False)
+
+    assert archive_path is None
+    assert path.read_text(encoding="utf-8") == ""
+    assert not (tmp_path / "archive").exists()
+
+
+def test_archive_log_file_returns_none_for_empty_file(tmp_path):
+    path = tmp_path / "stclibApp.log"
+    path.write_text("", encoding="utf-8")
+
+    assert archive_log_file(str(path)) is None
+    assert not (tmp_path / "archive").exists()
 
 
 # ── End-to-end against the real log shipped with the repo ─────────────────────
