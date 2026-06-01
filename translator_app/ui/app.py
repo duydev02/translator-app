@@ -686,7 +686,8 @@ class TranslatorApp(_BaseTk):
         )
         self._settings_menu.add_separator()
         self._settings_menu.add_command(label="Open app folder", command=self.open_app_folder)
-        self._settings_menu.add_command(label="Open diagnostics log", command=self.open_diagnostics_log)
+        self._settings_menu.add_command(label="Open error log", command=self.open_diagnostics_log)
+        self._settings_menu.add_command(label="Open startup log", command=self.open_startup_log)
         self._settings_menu.add_command(label="Reset window geometry", command=self.reset_window_geometry)
         self._settings_menu.add_command(label="Clear saved tabs", command=self.clear_saved_tabs)
         self._settings_btn.pack(side="right", pady=8)
@@ -2937,6 +2938,11 @@ class TranslatorApp(_BaseTk):
         if not os.path.exists(_APP_LOG):
             _app_log("Diagnostics log created")
         self._open_path(_APP_LOG)
+
+    def open_startup_log(self):
+        if not os.path.exists(_STARTUP_LOG):
+            _startup_log("startup log created")
+        self._open_path(_STARTUP_LOG)
 
     def reset_window_geometry(self):
         self.geometry(_DEFAULT_GEOMETRY)
