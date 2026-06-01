@@ -110,6 +110,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     settings.setdefault("noise_tables",   list(DEFAULT_NOISE_TABLES))
     settings.setdefault("hide_infra", True)
     settings.setdefault("hide_redundant", False)
+    settings.setdefault("recent_panel_open", True)
     settings.setdefault("primary_threshold", DEFAULT_PRIMARY_THRESHOLD)
 
     # ── Mutable state ────────────────────────────────────────────────────
@@ -174,6 +175,13 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
         bg=t["bg"], fg=t["fg_muted"], anchor="e",
     )
     recent_hint.pack(side="right")
+    recent_toggle_btn = tk.Button(
+        recent_head, text="", font=app._small, relief="flat", bd=0,
+        bg=t["muted_bg"], fg=t["muted_fg"], padx=8, pady=1, cursor="hand2",
+        activebackground=t["muted_bg"], activeforeground=t["muted_fg"],
+        command=lambda: _toggle_recent_panel(),
+    )
+    recent_toggle_btn.pack(side="right", padx=(0, 8))
 
     recent_body = tk.Frame(recent_panel, bg=t["bg"])
     recent_body.grid(row=1, column=0, sticky="ew", pady=(2, 0))
@@ -286,7 +294,8 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     def _refresh_recent_panel():
         recent_tree.delete(*recent_tree.get_children())
         active = settings.get("active_path") or ""
-        for idx, path in enumerate(settings.get("recent_paths") or []):
+        recents = settings.get("recent_paths") or []
+        for idx, path in enumerate(recents):
             tags = ("active_recent",) if path == active else ()
             count = chip_counts.get(path)
             recent_tree.insert(
@@ -300,6 +309,25 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
                 ),
             )
         recent_tree.tag_configure("active_recent", background=t["muted_bg"], foreground=t["fg"])
+        state_text = "visible" if bool(settings.get("recent_panel_open", True)) else "hidden"
+        recent_hint.configure(text=f"{len(recents)} recent · {state_text}")
+
+    def _apply_recent_panel_visibility():
+        is_open = bool(settings.get("recent_panel_open", True))
+        if is_open:
+            if not recent_body.winfo_ismapped():
+                recent_body.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+            recent_toggle_btn.configure(text="Hide")
+        else:
+            if recent_body.winfo_ismapped():
+                recent_body.grid_remove()
+            recent_toggle_btn.configure(text="Show")
+        _refresh_recent_panel()
+
+    def _toggle_recent_panel():
+        settings["recent_panel_open"] = not bool(settings.get("recent_panel_open", True))
+        _apply_recent_panel_visibility()
+        _save_settings_block()
 
     def _load_selected_recent():
         path = _selected_recent_path()
@@ -1814,6 +1842,7 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
 
     # ── Initial state ───────────────────────────────────────────────────
     _redraw_chips()
+    _apply_recent_panel_visibility()
     if path_var.get():
         _capture_mtime()
         # Schedule the first parse after the dialog finishes mapping so the
