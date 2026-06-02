@@ -184,6 +184,9 @@ def _collect_commands(app):
     add("Save output to file…",            app.on_export,           "File")
     add("Open file…",                      app.on_open_file,        "File")
     add("Reload db_schema_output.json",    app.on_reload_json,      "File")
+    add("Open app folder",                 app.open_app_folder,     "File")
+    add("Open error log",                  app.open_diagnostics_log, "File")
+    add("Open startup log",                app.open_startup_log,    "File")
 
     # ── Settings toggles
     add("Toggle theme (light / dark)",     app.toggle_theme,        "View")

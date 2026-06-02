@@ -318,7 +318,10 @@ All preferences, window size, and layout are persisted between sessions.
 
 The app shows a small startup window while settings, schema indexes, and the
 main interface are loading. If startup stalls, check `translator_startup.log`
-next to the executable/source checkout for the last completed stage.
+next to the executable/source checkout for the last completed stage. Use
+**Settings -> Open startup log** to open it directly. Use
+**Settings -> Open error log** for runtime callback errors saved in
+`translator_app.log`.
 
 Use **Settings -> Reset window geometry** if the main window opens off-screen or
 too small. Use **Settings -> Clear saved tabs** if a restored tab makes startup
