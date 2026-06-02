@@ -176,6 +176,7 @@ runnable SQL.
 - **Recent logs panel**: below the active path, recent logs are shown in
   a compact table with last modified time, file size, parsed statement count,
   full path, and Open / Folder / Remove actions. Double-click a row to load it.
+  Use **Hide / Show** to reclaim vertical space; the choice is saved.
 - **↻ Reload** force re-parses the active log right now.
 - **Clear log** archives the active log to a sibling `archive` folder, then
   truncates the original file. This keeps the old content available while
@@ -204,12 +205,15 @@ runnable SQL.
   repeated `HeaderCreateDao` `SELECT`s collapse to the latest useful
   statement.
 - **Click a statement** → its **Result (filled)**, then **SQL (with
-  ?)**, then **Params** tabs render below. Result is the first tab
-  because it's the one you usually want; the SQL in that tab is also
-  *prettified* — line breaks at major clauses (SELECT / FROM / WHERE /
+  ?)**, **Params**, then **Why score?** tabs render below. Result is the
+  first tab because it's the one you usually want; the SQL in that tab is
+  also *prettified* — line breaks at major clauses (SELECT / FROM / WHERE /
   ORDER BY / GROUP BY / HAVING / UNION / WITH / VALUES …), each JOIN
-  and AND/OR indented under its parent. The first ★-primary statement
-  is auto-selected after each load so you usually need zero clicks.
+  and AND/OR indented under its parent. The first ★-primary statement is
+  auto-selected after each load so you usually need zero clicks.
+- **Why score?** explains the row's Score column by listing each positive
+  and negative scoring reason, the threshold, DAO, detected tables, params,
+  and SQL length. This makes the ★ primary ranking auditable.
 - **Result pane highlights**: SQL keywords, string literals, numbers,
   and comments render in distinct theme-aware colors. **Values that
   came from bound parameters** (the substitutions for each `?`) get
@@ -221,6 +225,9 @@ runnable SQL.
 - **Line numbers / Word wrap**: Extract SQL text panes follow the
   app-wide **Settings** choices for line numbers and word wrap, matching
   the normal translator editor.
+- **Schema lookup from SQL**: right-click a physical table or column name
+  inside the Result or SQL tab and choose **Open Schema Browser** to inspect
+  that name without copying it.
 - **Sort by any column**: click the `Time` / `ID` / `DAO` / `Type` /
   `Tables` / `?` / `Score` headers to sort statements *within* each
   user-action group (the grouping itself is preserved). A `▼` / `▲`
@@ -314,7 +321,10 @@ All preferences, window size, and layout are persisted between sessions.
 
 The app shows a small startup window while settings, schema indexes, and the
 main interface are loading. If startup stalls, check `translator_startup.log`
-next to the executable/source checkout for the last completed stage.
+next to the executable/source checkout for the last completed stage. Use
+**Settings -> Open startup log** to open it directly. Use
+**Settings -> Open error log** for runtime callback errors saved in
+`translator_app.log`.
 
 Use **Settings -> Reset window geometry** if the main window opens off-screen or
 too small. Use **Settings -> Clear saved tabs** if a restored tab makes startup

@@ -33,6 +33,7 @@ from translator_app.logsql import (
     parse_params,
     pretty_sql,
     score_statement,
+    score_statement_reasons,
     tokenize_sql_for_highlight,
 )
 
@@ -257,6 +258,20 @@ def test_score_statement_large_sql_tiers():
     # Length tiers alone: +20 (>500) +10 (>1500) +15 (>5000) +15 (>10000)
     # = +60. Plus +10 baseline for non-noise DAO. Well above 30.
     assert score >= 60
+
+
+def test_score_statement_reasons_sum_to_score():
+    s = Statement(
+        fqcn="jp.co.mdware.example.OrderSelectDao",
+        sql="SELECT * FROM R_TENPO T JOIN R_SYOHIN S ON S.TENPO_CD = T.TENPO_CD WHERE T.TENPO_CD = ?",
+        params=[("STRING", "001001")],
+    )
+
+    reasons = score_statement_reasons(s)
+
+    assert sum(delta for _label, delta in reasons) == score_statement(s)
+    assert ("Known non-noise DAO", 10) in reasons
+    assert ("JOIN present", 15) in reasons
 
 
 def test_score_statement_param_cap_raised_to_ten():

@@ -714,21 +714,42 @@ def score_statement(
     `primary_packages` is opt-in: when set, statements whose DAO is in one
     of those packages get a strong positive bonus. Empty list means
     "everything not in noise_packages is potentially primary"."""
-    score = 0
+    return sum(delta for _label, delta in score_statement_reasons(
+        stmt,
+        primary_packages=primary_packages,
+        noise_packages=noise_packages,
+        noise_tables=noise_tables,
+    ))
+
+
+def score_statement_reasons(
+    stmt: Statement,
+    *,
+    primary_packages: Iterable[str] = (),
+    noise_packages: Iterable[str] = DEFAULT_NOISE_PACKAGES,
+    noise_tables: Iterable[str] = DEFAULT_NOISE_TABLES,
+) -> list[tuple[str, int]]:
+    """Return the score parts used by `score_statement`.
+
+    The UI uses this to explain why a statement was marked primary or noise.
+    Labels are intentionally short and user-facing; deltas sum to the final
+    score.
+    """
+    reasons: list[tuple[str, int]] = []
     fqcn = stmt.fqcn or ""
     sql = stmt.sql or ""
 
     # Package signal — explicit primary list wins outright.
     is_noise_pkg = bool(noise_packages and any(p in fqcn for p in noise_packages))
     if primary_packages and any(p in fqcn for p in primary_packages):
-        score += 50
+        reasons.append(("DAO matches primary package", 50))
     if is_noise_pkg:
-        score -= 80
+        reasons.append(("DAO matches noise package", -80))
     elif fqcn:
         # Baseline bonus: DAO is known and not in any noise package, so
         # it's at least a domain class. Without this, short domain SELECTs
         # like `TenpoSelectDao` sit just below the primary threshold.
-        score += 10
+        reasons.append(("Known non-noise DAO", 10))
 
     # SQL complexity. Length is the strongest signal: the user's
     # heuristic is "long SQL = real business query, short SQL = config
@@ -737,24 +758,24 @@ def score_statement(
     # business queries with UNIONs and many JOINs run 5–15K).
     n = len(sql)
     if n > 500:
-        score += 20
+        reasons.append(("SQL length > 500 chars", 20))
     if n > 1500:
-        score += 10
+        reasons.append(("SQL length > 1500 chars", 10))
     if n > 5000:
-        score += 15
+        reasons.append(("SQL length > 5000 chars", 15))
     if n > 10000:
-        score += 15
+        reasons.append(("SQL length > 10000 chars", 15))
     if n < 200:
-        score -= 10
+        reasons.append(("Short SQL < 200 chars", -10))
 
     # Joins, CTEs, unions — hallmarks of business queries.
     upper = sql.upper()
     if " JOIN " in upper or "\nJOIN" in upper:
-        score += 15
+        reasons.append(("JOIN present", 15))
     if upper.lstrip().startswith("WITH"):
-        score += 15
+        reasons.append(("WITH/CTE present", 15))
     if " UNION " in upper or " UNION ALL " in upper:
-        score += 10
+        reasons.append(("UNION present", 10))
 
     # Param count — more params means more user input being threaded
     # through. Capped so a 50-bind logging insert doesn't dominate, but
@@ -763,19 +784,22 @@ def score_statement(
     # legitimately rack up 20–60 bound params (see id=262f0e15 with
     # 56 binds across 7 UNION-ALL'd SELECTs).
     n_params = len(stmt.params)
-    score += min(n_params, 10) * 3   # capped at +30
+    if n_params:
+        reasons.append((f"{n_params} bound param(s), capped at 10", min(n_params, 10) * 3))
 
     # Target-table noise.
     for tbl in stmt.target_tables:
         if tbl in noise_tables:
-            score -= 40
+            reasons.append((f"Noise table target: {tbl}", -40))
             break  # one infrastructure target is enough to mark it
 
     # Single-param config lookups — `SELECT … WHERE PARAMETER_ID = ?`.
     if n_params == 1 and n < 300:
-        score -= 15
+        reasons.append(("Short single-param lookup", -15))
 
-    return score
+    if not reasons:
+        reasons.append(("No strong primary/noise signals", 0))
+    return reasons
 
 
 # ── Full-log parser ──────────────────────────────────────────────────────────
