@@ -46,8 +46,10 @@ Constants:
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Iterable
 
 # ── Regex constants ───────────────────────────────────────────────────────────
@@ -1164,11 +1166,44 @@ def read_log_file(path: str, encoding: str = "utf-8") -> str:
         return ""
 
 
-def clear_log_file(path: str) -> None:
-    """Truncate a log file in place.
+def _archive_path_for_log(path: str, *, now: datetime | None = None) -> str:
+    folder = os.path.dirname(os.path.abspath(path))
+    archive_dir = os.path.join(folder, "archive")
+    base = os.path.basename(path)
+    stem, ext = os.path.splitext(base)
+    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    name = f"{stem}_{stamp}{ext or '.log'}"
+    candidate = os.path.join(archive_dir, name)
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(archive_dir, f"{stem}_{stamp}_{suffix}{ext or '.log'}")
+        suffix += 1
+    return candidate
+
+
+def archive_log_file(path: str, *, now: datetime | None = None) -> str | None:
+    """Copy the current log bytes to a sibling `archive` folder.
+
+    Returns the archive path, or None when the source exists but is empty.
+    Raises OSError for the caller to display.
+    """
+    if os.path.getsize(path) == 0:
+        return None
+    archive_path = _archive_path_for_log(path, now=now)
+    os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+    with open(path, "rb") as src, open(archive_path, "wb") as dst:
+        dst.write(src.read())
+    return archive_path
+
+
+def clear_log_file(path: str, *, archive: bool = True) -> str | None:
+    """Archive a log file, then truncate it in place.
 
     Kept in the logic module so the UI's "Clear log" action has one small,
-    testable filesystem operation. Raises OSError for the caller to display.
+    testable filesystem operation. Returns the archive path when one was
+    created. Raises OSError for the caller to display.
     """
+    archive_path = archive_log_file(path) if archive else None
     with open(path, "w", encoding="utf-8"):
         pass
+    return archive_path
