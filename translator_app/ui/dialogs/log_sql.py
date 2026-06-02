@@ -31,6 +31,7 @@ from a chat). It swaps the body for a 3-column SQL/params/result view.
 from __future__ import annotations
 
 import os
+import re
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -53,6 +54,7 @@ from ...logsql import (
     parse_params,
     pretty_sql,
     read_log_file,
+    score_statement_reasons,
     tokenize_sql_for_highlight,
 )
 from ...themes import THEMES
@@ -1065,7 +1067,10 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
     install_treeview_cell_tooltip(params_tree, app._tooltip)
     nb.add(params_frame, text="Params")
 
-    for box in (sql_box, result_box):
+    score_box = _make_text_tab("Why score?")
+    score_box.configure(state="disabled")
+
+    for box in (sql_box, result_box, score_box):
         box.configure(state="disabled")
     body.add(detail_pane, minsize=180, height=380)
 
@@ -1089,6 +1094,81 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
                 values=(str(i), t_upper, val),
                 tags=(tag,),
             )
+
+    def _render_score_reasons(stmt: Statement | None):
+        if stmt is None:
+            _set_text(score_box, "")
+            return
+        reasons = score_statement_reasons(
+            stmt,
+            primary_packages=settings.get("primary_packages") or (),
+            noise_packages=settings.get("noise_packages") or DEFAULT_NOISE_PACKAGES,
+            noise_tables=settings.get("noise_tables") or DEFAULT_NOISE_TABLES,
+        )
+        total = sum(delta for _label, delta in reasons)
+        threshold = int(settings.get("primary_threshold", DEFAULT_PRIMARY_THRESHOLD))
+        verdict = "primary" if total >= threshold else "infrastructure/noise"
+        lines = [
+            f"Score: {total}  (threshold: {threshold})",
+            f"Result: {verdict}",
+            "",
+            "Reasons:",
+        ]
+        for label, delta in reasons:
+            sign = "+" if delta > 0 else ""
+            lines.append(f"  {sign}{delta:>3}  {label}")
+        lines.extend((
+            "",
+            f"DAO: {stmt.fqcn or '(unknown)'}",
+            f"Type: {stmt.statement_type or '(unknown)'}",
+            f"Tables: {', '.join(stmt.target_tables) if stmt.target_tables else '(none detected)'}",
+            f"Params: {len(stmt.params)}",
+            f"SQL length: {len(stmt.sql or '')} chars",
+        ))
+        _set_text(score_box, "\n".join(lines))
+
+    _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+    def _word_at_event(widget, event) -> str:
+        try:
+            idx = widget.index(f"@{event.x},{event.y}")
+            line_start = widget.index(f"{idx} linestart")
+            line = widget.get(line_start, f"{line_start} lineend")
+            col = int(idx.split(".")[1])
+        except Exception:
+            return ""
+        for match in _IDENT_RE.finditer(line):
+            if match.start() <= col <= match.end():
+                return match.group(0).upper()
+        return ""
+
+    def _open_schema_for_name(name: str):
+        if not name:
+            return
+        from .schema_browser import open_schema_browser
+        open_schema_browser(app, name_filter={name})
+
+    def _show_sql_text_menu(event, widget):
+        name = _word_at_event(widget, event)
+        t_name = name if name in app.table_index else ""
+        c_name = name if name in app.column_index else ""
+        if not (t_name or c_name):
+            return None
+        menu = tk.Menu(widget, tearoff=0,
+            bg=t["surface"], fg=t["fg"],
+            activebackground=t["accent"], activeforeground=t["accent_fg"],
+            bd=0, relief="flat")
+        label = f"Open Schema Browser for {name}"
+        menu.add_command(label=label, command=lambda n=name: _open_schema_for_name(n))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    for _box in (sql_box, result_box):
+        _box.bind("<Button-3>", lambda e, box=_box: _show_sql_text_menu(e, box))
+        _box.bind("<Button-2>", lambda e, box=_box: _show_sql_text_menu(e, box))
 
     # ── Status bar + actions ────────────────────────────────────────────
     status = tk.Frame(dlg, bg=t["bg"])
@@ -1373,12 +1453,14 @@ def open_log_sql_dialog(app, parent=None, *, embedded=False, on_close=None):
             for box in (sql_box, result_box):
                 _set_text(box, "")
             _render_params_table([])
+            _render_score_reasons(None)
             return
         class_lbl.configure(
             text=f"Class:  {stmt.fqcn or '(unknown)'}   ·   id={stmt.id}",
         )
         _set_text(sql_box, stmt.sql)
         _render_params_table(stmt.params)
+        _render_score_reasons(stmt)
         # The Result tab is the main thing — apply the lightweight
         # prettifier so a 933-char SQL renders as something the eye can
         # actually scan instead of one continuous line, then add syntax
